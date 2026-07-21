@@ -2,11 +2,10 @@ import { Router } from 'express';
 import type { SegmentType } from '@prisma/client';
 import { prisma } from '../db';
 import { requireDeviceAuth } from '../middleware/auth';
-import { isNonEmptyString } from '../validation';
+import { isNonEmptyString, isUuid } from '../validation';
 
 export const eventsRouter = Router();
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW_TITLE_MAX_LENGTH = 512;
 
 // Pass-through stub for now (just truncates) — the documented seam where
@@ -35,7 +34,7 @@ function validateEvent(raw: unknown, index: number): { errors: string[]; row?: V
   const prefix = `events[${index}]`;
   const event = (raw ?? {}) as Record<string, unknown>;
 
-  if (!isNonEmptyString(event.client_segment_id) || !UUID_RE.test(event.client_segment_id)) {
+  if (!isUuid(event.client_segment_id)) {
     errors.push(`${prefix}.client_segment_id must be a UUID string`);
   }
 

@@ -541,3 +541,128 @@ effects. One outstanding item raised, not yet resolved: `npm audit` reports
 5 vulnerabilities in vitest's dev-only transitive dependencies (low real
 risk here, but unresolved pending a decision on the `vitest@4` breaking
 upgrade).
+
+### Prompt 12 (user, verbatim, with an IDE selection of events.test.ts attached)
+
+> Build GET /api/v1/devices and GET /api/v1/devices/:id, per the locked contract. Both require requireAdminAuth.
+>
+> First, extract the device status derivation into a shared helper (e.g. src/lib/deviceStatus.ts), since multiple endpoints will need it. Logic, per the plan:
+>
+> last_seen_at older than 90s (or null) → offline
+> else if agent_status === 'paused' → paused
+> else if latest segment's type === 'idle' → idle
+> else → active
+>
+> GET /devices:
+>
+> List all devices: id, device_name, os, user_identifier, last_seen_at, status (derived), ordered by last_seen_at descending (most recently active first, nulls last).
+> For each device, "latest segment type" needs one query per device (or a single efficient query) — don't do N+1 queries in a naive loop if you can avoid it. Explain the approach you use.
+>
+> GET /devices/:id:
+>
+> Same shape as one row from /devices, plus whatever additional detail is useful (e.g. created_at). 404 if the device doesn't exist.
+>
+> Write Vitest + Supertest tests for both: a device with no segments yet (should be offline/no status crash), an online+active device, a paused device, an idle device, an offline device (stale last_seen_at), and the 404 case for a nonexistent device ID.
+>
+> Don't build the other dashboard endpoints yet — just these two.
+
+### Response 16 (assistant)
+
+Extracted two shared pieces first, since both were about to be needed in a
+second place (same reuse-over-duplication approach as `isNonEmptyString`
+earlier):
+- `isUuid` added to `src/validation.ts` (moved out of `events.ts`'s local
+  `UUID_RE`, which now imports it too) — needed again for validating the
+  `:id` route param.
+- `src/lib/deviceStatus.ts` — `deriveDeviceStatus(device, latestSegmentType)`,
+  a pure function implementing exactly the four-branch logic given, plus
+  the exported `OFFLINE_THRESHOLD_SECONDS = 90` constant from the plan.
+  Deliberately takes `latestSegmentType: SegmentType | null` as a plain
+  argument rather than querying inside the function, so it stays pure/unit
+  -testable and agnostic to how the caller fetched that value.
+
+**N+1 avoidance, explained as requested**: Prisma's query builder has no
+"latest related row per parent" primitive (no window-function support in
+the fluent API), so for the list endpoint I used one raw query with
+Postgres's `DISTINCT ON`:
+```sql
+SELECT DISTINCT ON (device_id) device_id, type
+FROM activity_segments
+ORDER BY device_id, started_at DESC
+```
+via `prisma.$queryRaw`, which returns the latest segment type for *every*
+device in a single round trip, built into a `Map<deviceId, type>` — the
+existing `idx_segments_device_time (device_id, started_at)` index makes
+this efficient. For the single-device endpoint, a plain
+`activitySegment.findFirst({ where: { deviceId }, orderBy: { startedAt: 'desc' } })`
+is simplest and correct there — no N+1 concern exists for a single row.
+
+Built both routes in `routes/devices.ts`:
+- `GET /` — `requireAdminAuth`, fetches all devices and the latest-type map
+  in parallel (`Promise.all`), serializes each via a shared
+  `serializeDevice()` helper. Ordering uses Prisma's native
+  `orderBy: { lastSeenAt: { sort: 'desc', nulls: 'last' } }` — checked this
+  compiles against the installed Prisma version (5.22) before relying on
+  it, since NULLS ordering support has moved in and out of preview across
+  Prisma versions; it's stable here.
+- `GET /:id` — `requireAdminAuth`, validates `:id` is UUID-shaped and
+  returns `404` immediately if not (an invalid UUID can never match a real
+  device either way, and letting it fall through to Prisma would throw a
+  raw `PrismaClientValidationError` on a `@db.Uuid` column — same 500-vs-clean-response
+  concern as `client_segment_id` earlier, resolved the same way but as 404
+  here since this is a resource lookup, not input validation). Otherwise
+  `findUnique`, `404` if not found, else the same `serializeDevice()` shape
+  plus `created_at`.
+
+Wrote `src/routes/devices.test.ts` covering exactly the six scenarios
+asked for, plus two admin-auth-rejection checks (directly testing the
+stated "both require requireAdminAuth" requirement) and a malformed-id
+check alongside the nonexistent-id 404 case:
+1. No admin `Authorization` header → `401`.
+2. Invalid admin key → `401`.
+3. Freshly registered device, no segments, `last_seen_at: null` → `offline`,
+   confirmed no crash.
+4. Recent heartbeat + `active` latest segment → `active`.
+5. `agent_status: 'paused'` with an `active` latest segment → `paused`
+   (proves paused overrides the segment-type check, per the stated branch
+   order).
+6. `agent_status: 'running'` with an `idle` latest segment → `idle`.
+7. Recent heartbeat backdated directly via `prisma.device.update` to 200s
+   ago (the API always sets `last_seen_at` to "now", so simulating
+   staleness requires reaching past it directly rather than waiting) →
+   `offline` despite `agent_status: 'running'`.
+8. Nonexistent (but well-formed) UUID → `404`.
+9. Malformed (non-UUID) id → `404`, not a `500`.
+10. `GET /devices` list — confirmed all devices registered by this suite
+    are present, and that once a `null` `last_seen_at` appears in the
+    ordered list, everything after it is also `null` (proves nulls-last,
+    not interleaved).
+
+Verified for real:
+- `npx tsc --noEmit` — clean, including confirming the `nulls: 'last'`
+  Prisma syntax type-checks.
+- Ran the pre-existing `events.test.ts` suite first to confirm no
+  regression from the `app.ts`/`validation.ts` changes — still 10/10.
+- `npm test` → both files, 20/20 passing.
+- Queried the DB directly and found six leftover devices from earlier
+  manual `curl` verification sessions in this same overall work session
+  (`JOMIEL-DESKTOP`, three `TEST-PC` rows, `EVENTS-TEST`, `VERIFY-TEST`) —
+  none of it real user data, all artifacts of my own prior manual testing.
+  Deleted them (segments first, then devices, respecting the
+  `ON DELETE RESTRICT` FK) rather than leaving the dev database cluttered
+  going into dashboard work, where a device list will actually be
+  rendered and reviewed.
+- Reran `npm test` once more after cleanup to confirm nothing depended on
+  that leftover data — still 20/20.
+
+---
+
+**Outcome at end of session:** `backend/` now exposes
+`GET /api/v1/devices` and `GET /api/v1/devices/:id`, both admin-auth-gated,
+backed by a shared `deriveDeviceStatus` helper and an N+1-avoiding
+`DISTINCT ON` query for the list endpoint. 20/20 tests passing across both
+route suites. The dev database was cleaned of my own leftover manual-test
+devices. Remaining dashboard endpoints (`/devices/:id/timeline`,
+`/stats/summary`, `/stats/top-apps`, `/stats/activity-over-time`,
+`/activity/recent`) are still outstanding, along with the unresolved
+`vitest` audit findings from the previous session.

@@ -1,10 +1,23 @@
 import { randomBytes } from 'crypto';
 import { Router } from 'express';
+import type { Device, SegmentType } from '@prisma/client';
 import { prisma } from '../db';
-import { hashApiKey } from '../middleware/auth';
-import { isNonEmptyString } from '../validation';
+import { hashApiKey, requireAdminAuth } from '../middleware/auth';
+import { isNonEmptyString, isUuid } from '../validation';
+import { deriveDeviceStatus } from '../lib/deviceStatus';
 
 export const devicesRouter = Router();
+
+function serializeDevice(device: Device, latestSegmentType: SegmentType | null) {
+  return {
+    id: device.id,
+    device_name: device.deviceName,
+    os: device.os,
+    user_identifier: device.userIdentifier,
+    last_seen_at: device.lastSeenAt,
+    status: deriveDeviceStatus(device, latestSegmentType),
+  };
+}
 
 // No dedup by device_name: every call creates a new device row, even if the
 // name matches an existing one. Known limitation, documented in the README
@@ -38,4 +51,55 @@ devicesRouter.post('/register', async (req, res) => {
 
   // The raw key is returned exactly once, here — only its hash is stored.
   res.status(201).json({ device_id: device.id, api_key: apiKey });
+});
+
+// Latest segment type per device, in one query rather than one query per
+// device: Prisma's query builder has no "latest related row per parent"
+// primitive (no window functions), so this uses Postgres's DISTINCT ON,
+// which the existing idx_segments_device_time (device_id, started_at)
+// index makes cheap.
+async function getLatestSegmentTypeByDevice(): Promise<Map<string, SegmentType>> {
+  const rows = await prisma.$queryRaw<{ device_id: string; type: SegmentType }[]>`
+    SELECT DISTINCT ON (device_id) device_id, type
+    FROM activity_segments
+    ORDER BY device_id, started_at DESC
+  `;
+  return new Map(rows.map((row) => [row.device_id, row.type]));
+}
+
+devicesRouter.get('/', requireAdminAuth, async (req, res) => {
+  const [devices, latestTypeByDevice] = await Promise.all([
+    prisma.device.findMany({
+      orderBy: { lastSeenAt: { sort: 'desc', nulls: 'last' } },
+    }),
+    getLatestSegmentTypeByDevice(),
+  ]);
+
+  res.json(devices.map((device) => serializeDevice(device, latestTypeByDevice.get(device.id) ?? null)));
+});
+
+devicesRouter.get('/:id', requireAdminAuth, async (req, res) => {
+  // A malformed id can never match a real device either way, so treat it
+  // the same as "not found" rather than a separate 400 case.
+  if (!isUuid(req.params.id)) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+
+  const device = await prisma.device.findUnique({ where: { id: req.params.id } });
+  if (!device) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+
+  const latestSegment = await prisma.activitySegment.findFirst({
+    where: { deviceId: device.id },
+    orderBy: { startedAt: 'desc' },
+    select: { type: true },
+  });
+
+  res.json({
+    ...serializeDevice(device, latestSegment?.type ?? null),
+    created_at: device.createdAt,
+  });
 });
