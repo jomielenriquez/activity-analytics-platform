@@ -137,11 +137,72 @@ examples) and sent:
 
 Wrote this log entry.
 
+### Prompt 3 (user, verbatim)
+
+> Yes, start with backend/. First just the Prisma schema matching the devices and activity_segments tables from the plan, plus the initial migration. Don't build routes yet — I want to check the schema against a running Postgres container first.
+
+### Response 6 (assistant)
+
+Checked for Docker (`docker --version` via both Git Bash and PowerShell, and a
+filesystem check for a Docker Desktop install path) — not found on the
+machine. Rather than assume how to proceed, asked the user via
+AskUserQuestion:
+
+- **Docker isn't installed on this machine, so I can't spin up the Postgres
+  container myself. How do you want to handle verifying the schema?**
+  Options offered: I'll install Docker myself / Use a local native Postgres
+  install / Just scaffold files, don't run anything yet.
+  → User chose: **I'll install Docker myself**
+
+Scaffolded the backend without running a live migration:
+- `docker-compose.yml` (repo root) — a single `postgres:16` service, port
+  5432, credentials/db name `activity_analytics`.
+- `backend/package.json` — `@prisma/client` + `prisma`/`typescript`/`@types/node`
+  as the only dependencies; no Express yet since routes weren't in scope.
+- `backend/tsconfig.json` — minimal strict config, `rootDir: src` (no `src/`
+  yet, nothing to compile).
+- `backend/prisma/schema.prisma` — `Device` and `ActivitySegment` models
+  mapped to the plan's exact table/column names, including the
+  `client_segment_id` unique constraint and the two named indexes
+  (`idx_segments_device_time`, `idx_segments_app`). Used
+  `@default(dbgenerated("gen_random_uuid()"))` on `Device.id` specifically to
+  force the DB-level default to match the plan's SQL, rather than relying on
+  Prisma's `uuid()` helper (which generates client-side).
+- `backend/.env.example` — `DATABASE_URL` matching the compose service.
+- Root `.gitignore` — was empty; added `node_modules/`, `dist/`, `build/`,
+  `.env`, `.env.local`, `*.log`.
+
+Ran `npm install` in `backend/`, copied `.env.example` to `.env` (gitignored,
+local-only), and ran `npx prisma validate` and `npx prisma generate` — both
+succeeded, confirming the schema is syntactically correct and the client
+compiles, without needing a live DB connection. Explicitly did **not** run
+`prisma migrate dev`, since that requires a live database to diff against and
+the user wanted to run that step themselves once Docker was installed.
+Reported the file list and gave the exact next commands
+(`docker compose up -d`, then `npx prisma migrate dev --name init`).
+
+### Prompt 4 (user)
+
+Opened `backend/prisma/migrations/20260721063914_init/migration.sql` in the
+IDE (the migration the user generated themselves by running
+`npx prisma migrate dev --name init` against their own Postgres container
+after installing Docker) and sent:
+
+> update AI_USAGE.md
+
+### Response 7 (assistant)
+
+Read the generated migration SQL to confirm it matched the plan's schema —
+it did, exactly: the `segment_type` enum, both tables with the plan's column
+names/types, the two named indexes, the `client_segment_id` unique
+constraint, and the FK from `activity_segments.device_id` to `devices.id`.
+No corrections needed. Wrote this log entry.
+
 ---
 
-**Outcome at end of session:** no code written yet. Deliverable is the
-approved data-model/API design in the plan file
-(`i-m-building-a-mini-peppy-bunny.md`); the final schema, event contract,
-and endpoint list from that plan are reproduced above in Response 2/3's
-description of the changes. Next step (not yet started): scaffold
-`backend/` per the plan.
+**Outcome at end of session:** `backend/` is scaffolded with a Prisma schema
+and an applied initial migration, verified by the user against a real
+Postgres container they set up themselves (Docker was not installed at the
+start of the session). No Express routes or application code yet — that
+remains the next step, per the plan's build order (`backend/` → `agent/` →
+`dashboard/`).
