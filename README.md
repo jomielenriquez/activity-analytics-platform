@@ -1,37 +1,34 @@
 # Activity Analytics Platform
 
-A mini ActivTrak-like activity analytics platform: a desktop agent, a
-Node.js/TypeScript backend, and a React dashboard.
+A mini ActivTrak-like activity analytics platform for tracking device
+activity across an organization: a visible, always-on desktop agent reports
+foreground-app and idle/active state to a backend, which a web dashboard
+queries to show admins who's online, what they're using, and how their time
+breaks down. Three components — a Go desktop agent, a Node.js/TypeScript
+backend, and a React dashboard — of which the backend is built so far.
 
-Full data model, API contract, key design decisions, and known limitations
-are in **[DESIGN.md](DESIGN.md)** — that file is the canonical reference.
-This README covers what the assignment specifically asks for plus how to
-run what's built so far.
+## Architecture
 
-## Status
+- **Agent** (Go, Windows, not yet built) — chosen for a small static binary
+  and low idle memory footprint suited to something that sits in the tray
+  all day, plus direct Win32 API access for foreground-window and idle
+  detection without a wrapper runtime.
+- **Backend** (Node.js + TypeScript, Express 5, Prisma, PostgreSQL) —
+  receives activity data from the agent and serves it to the dashboard.
+- **Dashboard** (React + TypeScript, not yet built) — admin-facing view of
+  device activity.
 
-| Component | Status |
-|---|---|
-| Backend | Built: device registration, event ingestion, device list/detail, stats summary, top apps, recent activity. Not yet built: timeline, activity-over-time. |
-| Desktop agent (Go) | Not yet built |
-| Dashboard (React) | Not yet built |
+Full data model, API contract, and the reasoning behind each design
+decision live in **[DESIGN.md](DESIGN.md)** — that's the canonical
+reference; this file won't duplicate it.
 
-## Agent stack: Go
-
-The agent will be a visible, always-on Windows tray application. Go is the
-right fit for that: it compiles to a small static binary with no runtime to
-bundle (unlike Electron), has a low idle memory footprint appropriate for
-something meant to sit in the background all day, and gives direct access
-to the Win32 APIs needed for foreground-window and idle detection
-(`GetForegroundWindow`, `GetWindowText`, `GetLastInputInfo`) without a
-wrapper layer.
-
-## Running the backend
+## Setup
 
 Requires Docker and Node.js 20+.
 
 ```
 docker compose up -d              # Postgres on :5432
+
 cd backend
 npm install
 cp .env.example .env              # set ADMIN_API_KEY to a real random value
@@ -39,9 +36,39 @@ npx prisma migrate deploy
 npm run dev                       # http://localhost:3000
 ```
 
-Run the test suite (needs the Postgres container running):
+Run the backend test suite (needs the Postgres container running):
 
 ```
 cd backend
 npm test
 ```
+
+## Completed so far
+
+Backend only. Ingestion (device auth):
+
+- `POST /api/v1/devices/register`
+- `POST /api/v1/events`
+
+Dashboard (admin auth):
+
+- `GET /api/v1/devices`
+- `GET /api/v1/devices/:id`
+- `GET /api/v1/stats/summary`
+- `GET /api/v1/stats/top-apps`
+- `GET /api/v1/activity/recent`
+
+Not yet built: `GET /api/v1/devices/:id/timeline`,
+`GET /api/v1/stats/activity-over-time`, the Go agent, and the React
+dashboard.
+
+## Known limitations
+
+See **[DESIGN.md](DESIGN.md#known-limitations)** for the full list and the
+reasoning behind each — device registration is unauthenticated, no dedup
+on device registration, force-flushed segments' row growth, the agent's
+unbounded retry queue (once built), the window-title redaction stub, and
+the test suite's isolation model, plus an open `npm audit` item in
+`vitest`'s dev dependencies.
+
+This section will expand as the agent and dashboard are built.

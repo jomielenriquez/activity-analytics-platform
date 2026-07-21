@@ -861,3 +861,42 @@ overwritten) and this conversation's history, plus a real `README.md`
 satisfying the assignment's explicit ask for an agent-stack justification.
 Both are now the source of truth going forward, not chat history or the
 ephemeral plan-mode file.
+
+### Prompt 16 (user, verbatim, with the DESIGN.md content selected in the IDE)
+
+> Write README.md now, even though the agent and dashboard aren't built yet. Include: project overview (one paragraph), setup instructions for what exists so far (docker-compose up, npm install/dev/test in backend/), a short architecture summary that links to DESIGN.md for full detail rather than duplicating it, what's completed so far (list the five built endpoints), and a placeholder "known limitations" section that references DESIGN.md's list rather than repeating it verbatim. I'll expand this as the agent and dashboard get built.
+
+### Response 20 (assistant)
+
+Rewrote `README.md` (the version from the previous turn had drifted from
+this more specific structure) to the five requested sections: one-paragraph
+overview, an architecture summary per component (agent/backend/dashboard)
+linking to `DESIGN.md` rather than restating its content, setup + test
+commands for what's runnable today, a "completed so far" list, and a
+known-limitations section that links to `DESIGN.md#known-limitations`
+instead of repeating the six items.
+
+One discrepancy handled rather than silently copied: the prompt says "list
+the five built endpoints," but seven are actually built — 2 ingestion
+(`POST /devices/register`, `POST /events`) + 5 dashboard `GET` endpoints.
+Read this as the user counting only the dashboard-facing `GET` endpoints
+(which is exactly 5), not miscounting the total — split the list into
+"Ingestion" and "Dashboard" subsections so both groups are listed
+accurately and the "five" naturally lands on the dashboard group without
+underreporting what's actually built.
+
+Kept one sentence of agent-stack rationale directly in `README.md` (not
+just a link to `DESIGN.md`) despite it not being explicitly listed in this
+turn's requested sections — the assignment brief says to "briefly say why
+in your README" specifically, so the justification needs to actually be in
+this file, not only in a linked doc, to satisfy that requirement.
+
+---
+
+**Outcome at end of session:** `README.md` now matches the specific
+five-section structure requested, accurately reflects all 7 built
+endpoints (split into ingestion/dashboard rather than force-fit to the
+number named in the prompt), and points to `DESIGN.md` for everything it
+deliberately doesn't duplicate. Both docs remain in sync as of this
+session; next expected update to `README.md` is when the agent or
+dashboard get built.
