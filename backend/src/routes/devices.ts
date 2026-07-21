@@ -4,7 +4,7 @@ import type { Device, SegmentType } from '@prisma/client';
 import { prisma } from '../db';
 import { hashApiKey, requireAdminAuth } from '../middleware/auth';
 import { isNonEmptyString, isUuid } from '../validation';
-import { deriveDeviceStatus } from '../lib/deviceStatus';
+import { deriveDeviceStatus, getLatestSegmentTypeByDevice } from '../lib/deviceStatus';
 
 export const devicesRouter = Router();
 
@@ -52,20 +52,6 @@ devicesRouter.post('/register', async (req, res) => {
   // The raw key is returned exactly once, here — only its hash is stored.
   res.status(201).json({ device_id: device.id, api_key: apiKey });
 });
-
-// Latest segment type per device, in one query rather than one query per
-// device: Prisma's query builder has no "latest related row per parent"
-// primitive (no window functions), so this uses Postgres's DISTINCT ON,
-// which the existing idx_segments_device_time (device_id, started_at)
-// index makes cheap.
-async function getLatestSegmentTypeByDevice(): Promise<Map<string, SegmentType>> {
-  const rows = await prisma.$queryRaw<{ device_id: string; type: SegmentType }[]>`
-    SELECT DISTINCT ON (device_id) device_id, type
-    FROM activity_segments
-    ORDER BY device_id, started_at DESC
-  `;
-  return new Map(rows.map((row) => [row.device_id, row.type]));
-}
 
 devicesRouter.get('/', requireAdminAuth, async (req, res) => {
   const [devices, latestTypeByDevice] = await Promise.all([

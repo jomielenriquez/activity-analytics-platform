@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type { SegmentType } from '@prisma/client';
 import { prisma } from '../db';
 import { requireDeviceAuth } from '../middleware/auth';
-import { isNonEmptyString, isUuid } from '../validation';
+import { isNonEmptyString, isUuid, isValidDateString } from '../validation';
 
 export const eventsRouter = Router();
 
@@ -13,10 +13,6 @@ const WINDOW_TITLE_MAX_LENGTH = 512;
 // plugs in later without touching callers or the schema.
 function redactWindowTitle(title: string, _appName: string | null): string {
   return title.length > WINDOW_TITLE_MAX_LENGTH ? title.slice(0, WINDOW_TITLE_MAX_LENGTH) : title;
-}
-
-function isValidDateString(value: unknown): value is string {
-  return typeof value === 'string' && !Number.isNaN(new Date(value).getTime());
 }
 
 interface ValidatedRow {

@@ -1,4 +1,5 @@
 import type { SegmentType } from '@prisma/client';
+import { prisma } from '../db';
 
 // Matches the plan's pinned timing constant: 3 missed 30s heartbeats.
 export const OFFLINE_THRESHOLD_SECONDS = 90;
@@ -41,4 +42,19 @@ export function deriveDeviceStatus(
   }
 
   return 'active';
+}
+
+// Latest segment type per device, in one query rather than one query per
+// device: Prisma's query builder has no "latest related row per parent"
+// primitive (no window functions), so this uses Postgres's DISTINCT ON,
+// which the existing idx_segments_device_time (device_id, started_at)
+// index makes cheap. Shared by any endpoint that needs current derived
+// status for some or all devices (device list/detail, stats/summary).
+export async function getLatestSegmentTypeByDevice(): Promise<Map<string, SegmentType>> {
+  const rows = await prisma.$queryRaw<{ device_id: string; type: SegmentType }[]>`
+    SELECT DISTINCT ON (device_id) device_id, type
+    FROM activity_segments
+    ORDER BY device_id, started_at DESC
+  `;
+  return new Map(rows.map((row) => [row.device_id, row.type]));
 }
