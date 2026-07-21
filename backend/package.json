@@ -1,0 +1,19 @@
+{
+  "name": "activity-analytics-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "prisma": "^5.18.0",
+    "typescript": "^5.5.4"
+  }
+}

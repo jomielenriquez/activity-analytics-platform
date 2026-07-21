@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SegmentType {
+  active
+  idle
+
+  @@map("segment_type")
+}
+
+model Device {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  deviceName     String    @map("device_name")
+  os             String
+  userIdentifier String    @map("user_identifier")
+  apiKeyHash     String    @map("api_key_hash")
+  agentStatus    String    @default("running") @map("agent_status")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastSeenAt     DateTime? @map("last_seen_at") @db.Timestamptz(6)
+
+  segments ActivitySegment[]
+
+  @@map("devices")
+}
+
+model ActivitySegment {
+  id              BigInt      @id @default(autoincrement())
+  deviceId        String      @map("device_id") @db.Uuid
+  clientSegmentId String      @map("client_segment_id") @db.Uuid
+  type            SegmentType
+  appName         String?     @map("app_name")
+  windowTitle     String?     @map("window_title")
+  startedAt       DateTime    @map("started_at") @db.Timestamptz(6)
+  endedAt         DateTime    @map("ended_at") @db.Timestamptz(6)
+  durationSeconds Int         @map("duration_seconds")
+  receivedAt      DateTime    @default(now()) @map("received_at") @db.Timestamptz(6)
+
+  device Device @relation(fields: [deviceId], references: [id])
+
+  @@unique([deviceId, clientSegmentId])
+  @@index([deviceId, startedAt], map: "idx_segments_device_time")
+  @@index([appName], map: "idx_segments_app")
+  @@map("activity_segments")
+}
