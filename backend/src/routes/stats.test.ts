@@ -263,3 +263,243 @@ describe('GET /api/v1/stats/top-apps', () => {
     expect(res.body).toEqual([{ app_name: 'chrome.exe', total_seconds: 20 }]);
   });
 });
+
+describe('GET /api/v1/stats/activity-over-time', () => {
+  let deviceA: { deviceId: string; apiKey: string };
+  let deviceB: { deviceId: string; apiKey: string };
+
+  beforeAll(async () => {
+    const resA = await request(app).post('/api/v1/devices/register').send({
+      device_name: 'ACTIVITY-OVER-TIME-A',
+      os: 'windows',
+      user_identifier: 'vitest',
+    });
+    deviceA = { deviceId: resA.body.device_id, apiKey: resA.body.api_key };
+
+    const resB = await request(app).post('/api/v1/devices/register').send({
+      device_name: 'ACTIVITY-OVER-TIME-B',
+      os: 'windows',
+      user_identifier: 'vitest',
+    });
+    deviceB = { deviceId: resB.body.device_id, apiKey: resB.body.api_key };
+
+    // Device A, spread across two hour buckets and two day buckets, plus
+    // a single segment (client_segment_id "boundary") whose started_at is
+    // 2 minutes before an hour boundary and ended_at is 3 minutes after
+    // it — used to confirm start-bucket-only attribution.
+    const eventsA = await request(app)
+      .post('/api/v1/events')
+      .set('Authorization', `Bearer ${deviceA.apiKey}`)
+      .send({
+        agent_status: 'running',
+        events: [
+          // 2034-01-01 10:00 hour bucket: 500 active, 100 idle
+          {
+            client_segment_id: randomUUID(),
+            type: 'active',
+            app_name: 'chrome.exe',
+            window_title: 't',
+            started_at: '2034-01-01T10:15:00Z',
+            ended_at: '2034-01-01T10:20:00Z',
+            duration_seconds: 300,
+          },
+          {
+            client_segment_id: randomUUID(),
+            type: 'active',
+            app_name: 'chrome.exe',
+            window_title: 't',
+            started_at: '2034-01-01T10:45:00Z',
+            ended_at: '2034-01-01T10:48:20Z',
+            duration_seconds: 200,
+          },
+          {
+            client_segment_id: randomUUID(),
+            type: 'idle',
+            started_at: '2034-01-01T10:50:00Z',
+            ended_at: '2034-01-01T10:51:40Z',
+            duration_seconds: 100,
+          },
+          // 2034-01-01 11:00 hour bucket: 150 active
+          {
+            client_segment_id: randomUUID(),
+            type: 'active',
+            app_name: 'notepad.exe',
+            window_title: 't',
+            started_at: '2034-01-01T11:05:00Z',
+            ended_at: '2034-01-01T11:07:30Z',
+            duration_seconds: 150,
+          },
+          // 2034-02-01 day bucket: 500 active
+          {
+            client_segment_id: randomUUID(),
+            type: 'active',
+            app_name: 'chrome.exe',
+            window_title: 't',
+            started_at: '2034-02-01T05:00:00Z',
+            ended_at: '2034-02-01T05:05:00Z',
+            duration_seconds: 300,
+          },
+          {
+            client_segment_id: randomUUID(),
+            type: 'active',
+            app_name: 'chrome.exe',
+            window_title: 't',
+            started_at: '2034-02-01T20:00:00Z',
+            ended_at: '2034-02-01T20:03:20Z',
+            duration_seconds: 200,
+          },
+          // 2034-02-02 day bucket: 400 idle
+          {
+            client_segment_id: randomUUID(),
+            type: 'idle',
+            started_at: '2034-02-02T03:00:00Z',
+            ended_at: '2034-02-02T03:06:40Z',
+            duration_seconds: 400,
+          },
+          // Boundary case: starts at 10:58 (in the 10:00 hour bucket),
+          // ends at 11:03 (past the 11:00 boundary) — must be attributed
+          // entirely to 10:00, nothing to 11:00.
+          {
+            client_segment_id: randomUUID(),
+            type: 'active',
+            app_name: 'boundary-test.exe',
+            window_title: 't',
+            started_at: '2034-03-01T10:58:00Z',
+            ended_at: '2034-03-01T11:03:00Z',
+            duration_seconds: 300,
+          },
+        ],
+      });
+    expect(eventsA.status).toBe(202);
+
+    // Device B: one segment inside the same hour bucket as device A's
+    // first entries, used to confirm device_id actually narrows results.
+    const eventsB = await request(app)
+      .post('/api/v1/events')
+      .set('Authorization', `Bearer ${deviceB.apiKey}`)
+      .send({
+        agent_status: 'running',
+        events: [
+          {
+            client_segment_id: randomUUID(),
+            type: 'active',
+            app_name: 'chrome.exe',
+            window_title: 't',
+            started_at: '2034-01-01T10:10:00Z',
+            ended_at: '2034-01-01T10:11:40Z',
+            duration_seconds: 100,
+          },
+        ],
+      });
+    expect(eventsB.status).toBe(202);
+  });
+
+  afterAll(async () => {
+    const ids = [deviceA.deviceId, deviceB.deviceId];
+    await prisma.activitySegment.deleteMany({ where: { deviceId: { in: ids } } });
+    await prisma.device.deleteMany({ where: { id: { in: ids } } });
+    await prisma.$disconnect();
+  });
+
+  it('rejects a request with no admin Authorization header', async () => {
+    const res = await request(app).get('/api/v1/stats/activity-over-time?bucket=hour');
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects a missing bucket', async () => {
+    const res = await request(app).get('/api/v1/stats/activity-over-time').set(adminAuthHeader());
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects an invalid bucket value', async () => {
+    const res = await request(app)
+      .get('/api/v1/stats/activity-over-time?bucket=week')
+      .set(adminAuthHeader());
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a malformed device_id', async () => {
+    const res = await request(app)
+      .get('/api/v1/stats/activity-over-time?bucket=hour&device_id=not-a-uuid')
+      .set(adminAuthHeader());
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a malformed from date', async () => {
+    const res = await request(app)
+      .get('/api/v1/stats/activity-over-time?bucket=hour&from=not-a-date')
+      .set(adminAuthHeader());
+    expect(res.status).toBe(400);
+  });
+
+  it('groups by hour bucket, summing active/idle separately, across a multi-hour span', async () => {
+    const res = await request(app)
+      .get(
+        `/api/v1/stats/activity-over-time?bucket=hour&from=2034-01-01T00:00:00Z&to=2034-01-01T23:59:59Z&device_id=${deviceA.deviceId}`,
+      )
+      .set(adminAuthHeader());
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      { bucket_start: '2034-01-01T10:00:00.000Z', active_seconds: 500, idle_seconds: 100 },
+      { bucket_start: '2034-01-01T11:00:00.000Z', active_seconds: 150, idle_seconds: 0 },
+    ]);
+  });
+
+  it('groups by day bucket, summing active/idle separately, across a multi-day span', async () => {
+    const res = await request(app)
+      .get(
+        `/api/v1/stats/activity-over-time?bucket=day&from=2034-02-01T00:00:00Z&to=2034-02-03T00:00:00Z&device_id=${deviceA.deviceId}`,
+      )
+      .set(adminAuthHeader());
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      { bucket_start: '2034-02-01T00:00:00.000Z', active_seconds: 500, idle_seconds: 0 },
+      { bucket_start: '2034-02-02T00:00:00.000Z', active_seconds: 0, idle_seconds: 400 },
+    ]);
+  });
+
+  it('attributes a segment spanning a bucket boundary entirely to its start bucket', async () => {
+    const res = await request(app)
+      .get(
+        `/api/v1/stats/activity-over-time?bucket=hour&from=2034-03-01T00:00:00Z&to=2034-03-01T23:59:59Z&device_id=${deviceA.deviceId}`,
+      )
+      .set(adminAuthHeader());
+
+    expect(res.status).toBe(200);
+    // Only the 10:00 bucket should exist — the segment starts at 10:58 and
+    // ends at 11:03, but none of it is counted in the 11:00 bucket.
+    expect(res.body).toEqual([
+      { bucket_start: '2034-03-01T10:00:00.000Z', active_seconds: 300, idle_seconds: 0 },
+    ]);
+    expect(res.body.some((b: { bucket_start: string }) => b.bucket_start.startsWith('2034-03-01T11'))).toBe(
+      false,
+    );
+  });
+
+  it('device_id narrows results to one device', async () => {
+    const withDeviceId = await request(app)
+      .get(
+        `/api/v1/stats/activity-over-time?bucket=hour&from=2034-01-01T00:00:00Z&to=2034-01-01T23:59:59Z&device_id=${deviceA.deviceId}`,
+      )
+      .set(adminAuthHeader());
+    const withoutDeviceId = await request(app)
+      .get('/api/v1/stats/activity-over-time?bucket=hour&from=2034-01-01T00:00:00Z&to=2034-01-01T23:59:59Z')
+      .set(adminAuthHeader());
+
+    expect(withDeviceId.status).toBe(200);
+    expect(withoutDeviceId.status).toBe(200);
+
+    // Device A alone: 500 active in the 10:00 bucket. Both devices
+    // combined: 500 + device B's 100 = 600 in the same bucket.
+    const soloBucket = withDeviceId.body.find(
+      (b: { bucket_start: string }) => b.bucket_start === '2034-01-01T10:00:00.000Z',
+    );
+    const combinedBucket = withoutDeviceId.body.find(
+      (b: { bucket_start: string }) => b.bucket_start === '2034-01-01T10:00:00.000Z',
+    );
+    expect(soloBucket.active_seconds).toBe(500);
+    expect(combinedBucket.active_seconds).toBe(600);
+  });
+});

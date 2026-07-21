@@ -9,7 +9,7 @@ if it ever disagrees with a chat transcript, this file (and the code) wins.
 | Component | Stack | Status |
 |---|---|---|
 | Desktop agent | Go, Windows | Not yet built |
-| Backend | Node.js + TypeScript, Express 5, Prisma, PostgreSQL | Built: register, events ingestion, device list/detail, device timeline, stats/summary, stats/top-apps, activity/recent |
+| Backend | Node.js + TypeScript, Express 5, Prisma, PostgreSQL | **Fully complete** — all 8 contract endpoints built and tested |
 | Dashboard | React + TypeScript | Not yet built |
 
 **Why Go for the agent**: a lightweight, always-on native process that has
@@ -133,7 +133,7 @@ Response `202`: `{ accepted, duplicates }`.
 
 **`GET /stats/top-apps?from&to&device_id?`** — `[{ app_name, total_seconds }]`, top 20, descending. Excludes idle segments (`app_name` is always null there).
 
-**`GET /stats/activity-over-time?from&to&bucket=hour|day&device_id?`** — *not yet built.*
+**`GET /stats/activity-over-time?from&to&bucket=hour|day&device_id?`** — `[{ bucket_start, active_seconds, idle_seconds }]`, ordered chronologically ascending. `bucket` is **required**, must be exactly `hour` or `day` (`400` otherwise). `device_id`, if provided, must be a valid UUID (`400` if not) but never `404`s for a well-formed id that matches no device — this is an aggregation endpoint, not a resource lookup, so a non-matching filter is just an empty result, same as `top-apps`. Buckets computed via raw SQL `date_trunc('hour'|'day', started_at)` grouped with `type` (same raw-SQL precedent as the `DISTINCT ON` query behind device status) — Prisma's query builder has no bucketing/`date_trunc` primitive. **Only buckets with at least one segment appear** — empty buckets are never zero-filled (see known limitations for why, and what it means for the dashboard). A segment is attributed **entirely** to the bucket containing its `started_at`, with no proportional splitting across a bucket boundary (see known limitations).
 
 **`GET /activity/recent?limit`** — `[{ device_name, type, app_name, window_title, started_at, ended_at, duration_seconds }]`, ordered by `started_at` desc. No `device_id` filter — not in the locked contract for this endpoint (unlike `top-apps`), not added speculatively. `limit` defaults to 50, clamped (not rejected) at 200 if higher; rejected with `400` if not a positive integer.
 
@@ -154,6 +154,8 @@ Deliberately not fixed now — documented so they're a decision, not an oversigh
 4. **The agent's local retry queue has no documented cap.** If the backend is unreachable for an extended period, unsent segments accumulate in memory with no size/age limit or disk persistence.
 5. **`redactWindowTitle()` is a truncate-only stub.** It's the documented seam for real redaction (e.g. always blanking titles for known password managers) — not implemented, since window titles are logged in full per the assignment's explicit ask, with this as the acknowledged privacy tradeoff.
 6. **Test suite isolation is serialized (`fileParallelism: false`), not transactional.** The Vitest suite hits one shared, mutable Postgres database with no per-test rollback. A concrete bug this caused and fixed: `stats/summary`'s `active_device_count` test raced against a concurrently-running file's device heartbeat before this flag was added. Serializing file execution removes the *timing* race but not the underlying shared-mutable-state design — it doesn't protect against a crashed test skipping its cleanup and leaving dirty state for the next one. The more correct fix, per-test transaction rollback, would require routing the app's Prisma singleton (`db.ts`) through an ambient per-test transaction (a real refactor — `routes/events.ts` already opens its own nested `$transaction`, which would need savepoint handling), which is more surgery than this assignment's scope warrants right now.
+7. **`activity-over-time` attributes a segment entirely to the bucket containing its `started_at`, with no proportional splitting across a bucket boundary.** A segment starting at 10:58 and ending at 11:03 counts fully in the 10:00 hour bucket, none of it in 11:00. A deliberate simplification: real splitting would mean re-deriving partial durations per bucket instead of trusting the stored `duration_seconds` directly, which is real complexity not warranted here — most segments are far shorter than a bucket width anyway (force-flush caps a single segment at 5 minutes, well under even the hour bucket).
+8. **`activity-over-time` never zero-fills empty buckets.** A bucket only appears in the response if it has at least one segment. Backfilling would need a bucket sequence independent of the data — awkward when `from`/`to` are omitted (all-time has no natural start) — and would silently balloon the response for any sparse range (day-bucketed over a year with activity on 10 days would otherwise return 355 zero rows). This means the dashboard's chart needs to render **real gaps** on the x-axis for missing buckets, not assume a dense, continuous series.
 
 Separately, unresolved and not a design decision: `npm audit` flags 5
 vulnerabilities (1 critical, 1 high, 3 moderate) in `vitest`'s transitive

@@ -1033,3 +1033,153 @@ every prompt/response pair, not just the substantive ones.
 type-guard-vs-cast confirmation exchange that had been dropped, plus this
 correction itself. No code or design docs changed this turn — logging
 only.
+
+### Prompt 20 (user, verbatim)
+
+> Build GET /api/v1/stats/activity-over-time?from&to&bucket=hour|day&device_id?, requiring requireAdminAuth, per the contract in DESIGN.md.
+>
+> bucket is required, must be exactly "hour" or "day" - 400 if missing or any other value.
+> from/to optional ISO timestamps, same validation pattern as the other stats endpoints (reuse the existing date-range helper). If omitted, cover all-time.
+> device_id optional, filters to one device if provided - 400 if provided but not a valid UUID, same pattern as elsewhere (do not 404 here even if the device does not exist, just return an empty result set, since this is an aggregation endpoint not a resource lookup).
+> Bucket boundary decision, locked in: a segment is attributed entirely to the bucket containing its started_at timestamp. No proportional splitting across bucket boundaries even if a segment spans one. Document this as a deliberate simplification in a code comment, not an oversight, and add it to DESIGN.md known limitations.
+> Response shape: [{ bucket_start, active_seconds, idle_seconds }], one entry per bucket in the range that has at least one segment, ordered chronologically ascending. Do not backfill empty buckets with zero rows - explain your reasoning on that choice, and note it as something the dashboard needs to handle (a chart with gaps, not a continuous zero-filled series).
+> Use Postgres date_trunc('hour', started_at) or date_trunc('day', started_at) for bucketing, grouped alongside type, summed on duration_seconds - raw SQL is fine here given the same DISTINCT ON precedent already set for deviceStatus.
+>
+> Write Vitest and Supertest tests: hour bucketing groups correctly across a multi-hour span, day bucketing groups correctly across a multi-day span, device_id filter narrows results to one device, invalid bucket value rejected with 400, and a segment spanning a bucket boundary is attributed to its start bucket only (confirm this explicitly, do not just assume it from the query).
+>
+> This is the last backend endpoint per the contract. Once built and tested, update DESIGN.md's component table to mark backend as fully complete, and README.md's completed list accordingly.
+
+### Response 24 (assistant)
+
+Added `GET /stats/activity-over-time` to `routes/stats.ts`, reusing
+`parseDateRangeQuery` (per the explicit instruction not to reimplement it)
+and the same `isUuid`-then-`400`/no-`404` `device_id` pattern already used
+by `top-apps`. Built the bucketing query with `Prisma.sql`/`Prisma.join`/
+`Prisma.empty` (Prisma's raw-query composition helpers) rather than string
+concatenation, so the conditional `WHERE` clause (0–3 of: `device_id =
+...`, `started_at >= ...`, `started_at <= ...`) stays fully parameterized
+regardless of which filters are present — `date_trunc`'s bucket argument
+(`${bucket}`) is also passed through the same tagged-template
+parameterization, not spliced into the SQL string, even though `bucket`
+was already validated to be exactly `'hour'`/`'day'` beforehand (defense
+in depth, not relied upon for safety). Cast `SUM(duration_seconds)::int`
+in the SQL specifically to avoid Postgres returning `bigint` for a `SUM`
+over an `int4` column, which Prisma maps to JS `bigint` and `JSON.stringify`
+cannot serialize — would have been a runtime crash on the first real
+response otherwise, not something `tsc` would have caught.
+
+Documented both requested decisions exactly where asked: a code comment
+directly above the raw query explaining the start-bucket-only attribution
+choice, and a second comment above the final array-building step
+explaining the no-zero-fill choice and what it implies for the dashboard
+(real gaps on the chart, not a dense series) — both later ported into
+`DESIGN.md`'s known limitations (items 7 and 8) essentially verbatim from
+the code comments, so the reasoning isn't duplicated-and-drifted between
+the two places.
+
+Refactoring: none needed this time — `buildStartedAtFilter` and
+`parseDateRangeQuery` were already shared from the `devices.ts`/`timeline`
+work two turns ago, so this route only added what was genuinely new
+(bucket validation, the raw query, the pivot-into-response-shape step).
+
+Wrote a new `describe('GET /api/v1/stats/activity-over-time')` block in
+`stats.test.ts`, using 2034-dated fixtures (unique to this block, same
+far-future-date isolation trick as the rest of the file) across two
+devices: hour-bucket grouping (two segments merged into one bucket's
+active total, an idle segment merged into the same bucket, a third segment
+in the next hour bucket kept separate), day-bucket grouping across two
+days, the boundary case (a segment starting at 10:58 and ending at 11:03,
+asserting the response has *only* a 10:00 bucket and explicitly asserting
+no bucket_start begins with "...T11" — not just checking the 10:00 total,
+per the instruction to confirm this explicitly rather than assume it),
+device_id narrowing (compared with-vs-without device_id on the same query,
+asserting device A alone sums to 500s while both devices combined sum to
+600s), plus the standacard auth/400 checks (missing bucket, invalid bucket
+value, malformed device_id, malformed from).
+
+Verified for real, more thoroughly than usual given the raw-SQL surface
+area:
+- `npx tsc --noEmit` — clean.
+- Ran the existing suite first — still 45/45, no regression.
+- Full suite with new tests: **54/54** passing on the first run.
+- Reran the full suite twice more back-to-back for confidence given the
+  SQL complexity (date_trunc, conditional raw WHERE composition,
+  BigInt-vs-int casting) — 54/54 both times, no flakiness.
+- Queried the DB directly — 0 devices, 0 segments left over.
+- **Manual live check beyond the automated suite**: built and ran the
+  compiled server, registered a real device, posted two segments (one
+  active, one idle) landing in the same hour, and curled
+  `/stats/activity-over-time?bucket=hour` directly — visually confirmed the
+  exact response shape (`bucket_start` as a full ISO string with
+  milliseconds, correct combined `active_seconds`/`idle_seconds`) rather
+  than trusting the automated assertions alone for a query this novel.
+  Cleaned up the manually-created device afterward and stopped the server.
+- Updated `DESIGN.md`: component table now says backend is **fully
+  complete** (all 8 endpoints), filled in the `activity-over-time` contract
+  entry, added known-limitations items 7 (bucket attribution) and 8 (no
+  zero-fill).
+- Updated `README.md` to match: architecture/overview lines now say the
+  backend is complete, `activity-over-time` moved from "not yet built" to
+  the completed list, "not yet built" now only names the agent and
+  dashboard, and the known-limitations summary line mentions the two new
+  items.
+
+---
+
+**Outcome at end of session:** `GET /api/v1/stats/activity-over-time` is
+built and tested (54/54 across four suites, plus a manual live check of the
+raw-SQL output). This was the last endpoint in the locked API contract —
+**the backend is now fully complete**, reflected in both `DESIGN.md` and
+`README.md`. Remaining work on the project overall: the Go desktop agent
+and the React dashboard.
+
+### Prompt 21 (user, verbatim)
+
+> Are there any other raw SQL aggregates in the codebase using SUM() over an int column - stats/summary's total_active_seconds/total_idle_seconds, for instance? Confirm those already handle this the same way, or if they got lucky because Prisma's typed query builder (not raw SQL) auto-converts differently there.
+
+### Response 25 (assistant)
+
+Grepped the whole `backend/src` tree for `$queryRaw`, `_sum`, and `SUM(`
+rather than relying on memory of what was written. Found exactly one other
+raw-SQL spot: `lib/deviceStatus.ts`'s `DISTINCT ON` query — but it selects
+`type`, not an aggregate, so no bigint exposure there regardless.
+`stats/summary` and `stats/top-apps` both go through
+`groupBy({ _sum: { durationSeconds: true } })`, Prisma's typed query
+builder, not `$queryRaw` — a genuinely different code path from
+`activity-over-time`'s raw query.
+
+Verified empirically rather than asserting from documentation memory: ran
+a live script creating a real device+segment, calling the actual
+`groupBy`/`_sum` query used in production code, and checked
+`typeof result[0]._sum.durationSeconds` directly — `'number'`, and
+`JSON.stringify` succeeded. Then went one step further for concrete
+evidence beyond a single runtime sample: grepped the generated Prisma
+client's `.d.ts` for `ActivitySegmentSumAggregateOutputType` and found it
+declares `id: bigint | null` (the `BigInt`/`BigSerial` PK) side by side
+with `durationSeconds: number | null` (the `Int` field) in the *same*
+generated type — direct proof Prisma differentiates the aggregate return
+type per-field based on the field's schema-declared scalar type, not based
+on what SQL actually executed underneath (Postgres computes `SUM(int4)` as
+`int8` either way). Cleaned up the temporary device/segment created for
+the runtime check afterward.
+
+Conclusion given to the user: `summary`/`top-apps` were never exposed to
+this bug — not luck, by design — and the rule going forward is that the
+bigint risk is specific to `$queryRaw`/`$queryRawUnsafe`, not to "any SUM
+in the codebase." No other fix needed anywhere else.
+
+### Prompt 22 (user, verbatim)
+
+> Update AI_USAGE.md
+
+### Response 26 (assistant)
+
+Wrote this log entry.
+
+---
+
+**Outcome at end of session:** Confirmed and documented, with concrete
+evidence (generated-type inspection + a live runtime check, not just
+assertion from memory), that the `bigint`/`JSON.stringify` risk fixed in
+`activity-over-time` is isolated to raw SQL aggregates and doesn't affect
+`stats/summary` or `stats/top-apps`. No code changes this turn.
