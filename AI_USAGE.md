@@ -314,15 +314,67 @@ Re-read `CLAUDE.md` — unchanged from the logging rule already in force
 this session (log every session's prompts/responses/corrections verbatim,
 append before stopping). Backfilled this entry covering everything since
 Response 7, since the last log update had only covered through the Prisma
-migration confirmation.
+migration confirmation. Noted back to the user that this matches the
+existing CLAUDE.md cadence (end of session / natural boundaries) and asked
+whether they actually wanted per-message granularity instead.
+
+### Prompt 9 (user, verbatim)
+
+> Build POST /devices/register, per the contract in the plan. Requirements:
+>
+> Body: { device_name, os, user_identifier }. Validate all three are present and non-empty strings; 400 with a clear message if not.
+> Generate a random API key server-side (32 bytes, hex -  same pattern as the ADMIN_API_KEY we generated earlier), hash it with hashApiKey from auth.ts, and insert a new devices row with agent_status: 'running' and last_seen_at: null.
+> No dedup by device_name - every call creates a new device row, even if the name matches an existing one. This is a known limitation to note in the README, not something to solve now.
+> Response: 201, { device_id, api_key } - return the raw key here since this is the only time it's ever shown; only the hash is stored.
+> Use the existing error handler - throw on unexpected failures, don't hand-roll try/catch.
+> No auth required on this route (matches the "known limitations" note already in the plan).
+>
+> Don't build /events yet - just this one route, so I can test it with curl before moving on.
+
+### Response 13 (assistant)
+
+Not in plan mode for this request — implemented directly. Created
+`backend/src/routes/devices.ts`: `POST /register` validates `device_name`,
+`os`, `user_identifier` are all non-empty strings (400 with a message
+listing exactly which fields were missing/invalid if not), generates a
+32-byte random hex API key via `crypto.randomBytes`, hashes it with the
+existing `hashApiKey` from `middleware/auth.ts` (reused rather than
+duplicated), and creates the device row with `agentStatus: 'running'`,
+`lastSeenAt: null` explicitly. No try/catch — an unexpected `prisma.device.create`
+failure rejects the async handler and Express 5 forwards it to the existing
+`errorHandler` automatically. Mounted the router in `index.ts` at
+`/api/v1/devices`, before the error handler (must be last).
+
+Verified end-to-end with the server actually running:
+- `npx tsc --noEmit` — clean.
+- **False start**: first curl attempt against a freshly backgrounded server
+  returned `404 Cannot POST /api/v1/devices/register`. Investigated with
+  `tasklist` and found *two* `node.exe` processes running — a stale one left
+  over from the earlier skeleton-verification session was still bound to
+  port 3000, so the new build with the route never actually received the
+  request. Killed all node processes, started a single clean instance, and
+  confirmed via `tasklist` only one was running before retesting.
+- Valid registration → `201`, `{"device_id": "...", "api_key": "..."}`.
+- Missing `user_identifier` → `400`, message names exactly that field.
+- Whitespace-only `os` (`"   "`) → `400`, correctly treated as invalid, not
+  just "missing."
+- Empty body `{}` → `400`, message names all three fields.
+- Malformed JSON body → `400` with the body-parser's own message
+  (`Expected property name or '}' in JSON at position 1`), confirming the
+  shared error handler catches failures Express itself throws, not just
+  ones from route code.
+- Queried the row directly via Prisma (`device.findMany`) to confirm what
+  was actually persisted: `agentStatus: "running"`, `lastSeenAt: null`,
+  and `apiKeyHash` stored (not the raw key). Independently recomputed
+  `sha256("8959a5f8...d4c5")` and confirmed it matches the stored hash
+  exactly, verifying the hash-and-discard behavior end to end rather than
+  just trusting the response body.
+- Stopped the background server afterward.
 
 ---
 
-**Outcome at end of session:** `backend/` now has a working Express 5 +
-TypeScript skeleton on top of the previously-verified Prisma schema/
-migration — `src/index.ts`, `src/db.ts`, `src/middleware/auth.ts`,
-`src/middleware/errorHandler.ts` — with fail-fast env validation and both
-auth middlewares wired (device key lookup via SHA-256 hash,
-admin key via `timingSafeEqual`), verified by actually running the compiled
-server and both failure paths. No routes mounted yet — that's the deliberate
-boundary for this pass and the next piece of work.
+**Outcome at end of session:** `backend/` has a working `POST /api/v1/devices/register`
+route on top of the Express 5 skeleton and Prisma schema from earlier —
+verified against a live server and live Postgres, including the validation,
+success, and error-handler paths. `POST /events` and the dashboard `GET`
+endpoints remain the next pieces, per the plan's build order.

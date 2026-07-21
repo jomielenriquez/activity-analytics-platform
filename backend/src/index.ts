@@ -21,12 +21,14 @@ validateEnv();
 // before we get a chance to report ours.
 import express from 'express';
 import { errorHandler } from './middleware/errorHandler';
+import { devicesRouter } from './routes/devices';
 
 const app = express();
 app.use(express.json());
 
-// Routes are added in a later pass; the error handler is registered now so
-// it's ready as soon as the first route is mounted.
+app.use('/api/v1/devices', devicesRouter);
+
+// Registered last so it catches errors from every route mounted above.
 app.use(errorHandler);
 
 const port = Number(process.env.PORT) || 3000;
