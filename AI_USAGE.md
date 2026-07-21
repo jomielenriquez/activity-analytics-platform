@@ -1615,3 +1615,161 @@ live against a real backend and Postgres, not just compiled. Caught and
 fixed one real bug (empty window titles) that only a live OS-level test
 surfaced. `DESIGN.md` and both READMEs are in sync with the current state.
 Remaining on the project overall: the React dashboard.
+
+### Prompt 28 (user, verbatim)
+
+> Set up the React + TypeScript dashboard at dashboard/, using Vite. This first pass is project scaffolding plus one real view - the device list - so the whole fetch-to-render pipeline is proven before building the rest.
+>
+> Requirements:
+>
+> Vite + React + TypeScript template, minimal dependencies to start.
+> A typed API client module (e.g. src/api.ts) wrapping fetch calls to the backend, using the admin API key for auth. Store the admin key and backend base URL as Vite env vars (.env, gitignored, with a .env.example committed) - not hardcoded.
+> One real view: fetch GET /api/v1/devices and render it as a table - device name, os, user identifier, last seen (formatted as relative time, e.g. "2 minutes ago"), and status (with a visual indicator - color-coded text or a small badge is enough, does not need to be fancy).
+> Handle loading and error states explicitly - do not just render nothing while fetching or on failure, show a clear message.
+> Poll and refresh the device list on an interval (a reasonable default like 10-15 seconds) so status changes show up without a manual page reload, since this is meant to be a live monitoring view.
+> Basic layout shell (header/nav placeholder) that the other views (timeline, stats, recent activity) will slot into later - do not build routing or the other views yet, just leave the structure obvious for where they will go.
+>
+> Keep styling minimal and clean - plain CSS or a lightweight approach is fine, this does not need to be beautiful per the assignment, just usable and clear.
+>
+> This is intentionally scoped to prove the pipeline: real backend data rendering correctly in the browser, with loading/error/live-refresh handled, before building out the rest of the dashboard.
+
+### Prompts 29–31 (user, verbatim) — mid-task interruption
+
+> Continue from where you left off.
+
+> continue
+
+> continue
+> Continue from where you left off.
+
+No response requested for these three — the session was mid-interruption
+(see Prompt 32) with nothing actionable yet; each was answered with "No
+response requested." and no action taken, logged here per the standing
+"log every exchange" instruction rather than skipped silently.
+
+### Prompt 32 (user, verbatim)
+
+> My laptop auto updates, continue
+
+### Response 32 (assistant)
+
+Diagnosed rather than assumed what broke: found a corrupted `npx` cache
+entry (`JSON.parse` failure on a zeroed-out `package.json`) consistent
+with a reboot interrupting an in-flight npm operation, cleared it, and
+confirmed no stray `node`/`agent.exe` processes were left running. Checked
+the dashboard directory and `git status` before doing anything else —
+confirmed everything from before the interruption (all component files,
+`api.ts`, `.env`, `.env.example`, the successful `dist/` build) survived
+intact, no data lost.
+
+Loaded the `dataviz` skill before writing any status-indicator styling,
+since the status badge is explicitly in its trigger list ("dashboard",
+"stat tile"-adjacent). Mapped the four device statuses onto its fixed
+status palette: `active`→good (green), `idle`→warning (amber),
+`offline`→critical (red) — and deliberately did **not** force `paused`
+onto that ladder, since it's a severity scale for problems and "paused" is
+a deliberate, user-initiated state, not one; gave it a neutral/muted dot
+instead. Also followed the skill's non-negotiable that status color lives
+on a small dot, not the text itself ("text wears text tokens, never the
+series/status color") — text stays in normal ink so meaning never depends
+on color perception alone.
+
+Scaffolded via `npm create vite@latest dashboard -- --template react-ts`
+(React 19, Vite 8, `oxlint` — minimal deps out of the box, matching the
+"minimal dependencies to start" ask). Built:
+- `src/api.ts` — typed client, fails fast at module load if
+  `VITE_BACKEND_URL`/`VITE_ADMIN_API_KEY` are missing (mirrors the
+  backend's own fail-fast env pattern), `Device`/`DeviceStatus` types
+  matching the real `GET /devices` response shape.
+- `src/utils/relativeTime.ts` — hand-rolled "2 minutes ago" formatting, no
+  date library dependency, consistent with this project's general
+  preference for avoiding a dependency for something this small (same
+  reasoning as the agent's hand-rolled UUID generation).
+- `src/components/StatusBadge.tsx`, `Layout.tsx` (static nav placeholder —
+  only "Devices" does anything, the other three items are inert and
+  `title`-hinted "Not built yet"), `DeviceList.tsx` (fetch + 15s poll +
+  three explicit states: loading, hard error with nothing ever loaded, and
+  soft error where a later poll fails but last-known data stays visible
+  behind a "failed to refresh" banner rather than being blanked).
+- Confirmed `root .gitignore`'s bare `.env`/`.env.local` patterns already
+  cover `dashboard/.env` (verified with `git check-ignore -v`, not
+  assumed) — no gitignore changes needed there.
+- Removed the unused scaffold boilerplate (demo logos, the old marketing-page
+  App.tsx/App.css, `icons.svg`) rather than leaving dead assets around.
+
+`npm run build` and `npm run lint` (`oxlint`) both clean.
+
+**Verified in a real browser, not just build success** — no `chromium-cli`
+available, so installed Playwright + Chromium into a scratch location
+(hit and self-healed two more instances of npm cache corruption from the
+same interruption along the way: a truncated tarball, fixed by npm's own
+cache-refresh retry). Also found **Docker Desktop's daemon wasn't running**
+post-reboot, and its install path had moved (`Program Files\Docker\Docker`
+→ `AppData\Local\Programs\DockerDesktop` — apparently reinstalled during
+the update) — located the new path, started it, and polled
+`docker compose ps` rather than guessing a fixed wait.
+
+First real Playwright run surfaced a genuine bug: `Access to fetch ...
+blocked by CORS policy` — the backend never sent
+`Access-Control-Allow-Origin`, so the browser blocked every request from
+the dashboard's origin before it even reached auth. Neither `curl` nor the
+Vitest/Supertest suite would ever catch this, since neither is a browser
+enforcing CORS — only a real browser request surfaces it. Fixed by adding
+`cors` (checked its maintenance status first, same as every other
+dependency decision this project — actively pushed last month, official
+Express org package) to the backend with an open-origin policy, explained
+in a comment and in `DESIGN.md`: permissive origin is fine here
+specifically because auth is a header-based Bearer token, not a cookie, so
+CORS's actual protection (restricting *credentialed* cross-origin
+requests) doesn't apply — `requireAdminAuth` is still the real boundary.
+Reran the full backend suite (54/54) to confirm the new middleware didn't
+break anything.
+
+Seeded four realistic test devices (active/paused/idle/never-registered)
+via direct API calls to get a visually meaningful screenshot, discovered
+they'd gone stale to "offline" by the time of the check (correct behavior
+— genuinely 90+ seconds had passed while fixing Docker/CORS, not a bug),
+refreshed their heartbeats, and re-verified. Looked at the actual
+screenshot (not just the extracted text) to confirm layout/colors
+rendered correctly.
+
+Went beyond the happy path deliberately:
+- **Live polling**: changed a device's `agent_status` via the real API
+  with the page already loaded and *zero* page interaction, waited 16s,
+  confirmed the table updated on its own — proves the poll cycle actually
+  works, not just the initial fetch.
+- **Hard error**: killed the backend before first load, confirmed a clear
+  red-bordered banner, not a blank page.
+- **Soft error**: loaded successfully first, *then* killed only the
+  backend's process (found its specific PID via `Get-NetTCPConnection
+  -LocalPort 3000`, not a blanket `taskkill` — learned that lesson after
+  accidentally killing the dashboard dev server twice earlier by killing
+  all `node.exe` indiscriminately), confirmed the "failed to refresh"
+  banner appeared while the previously-loaded rows stayed on screen.
+
+Cleaned up thoroughly afterward: deleted all seeded test devices/segments
+from Postgres, confirmed 0 rows remaining, reran the full backend suite
+once more (54/54) and the dashboard build/lint as a final sanity pass.
+
+Updated `DESIGN.md` (dashboard status in the components table, the CORS
+decision under "Key decisions," known-limitation #10 for the admin key
+being bundled into the client-side JS — an inherent property of Vite env
+vars, not a bug, but a real tradeoff worth documenting), `dashboard/README.md`
+(setup, what's built, the known-limitation callout, and exactly how this
+was verified), and root `README.md` (architecture/status/known-limitations
+sections updated to match).
+
+---
+
+**Outcome at end of session:** The dashboard has real scaffolding and one
+fully working view — the device list — verified with an actual headless
+browser against a live backend: correct data, correct status colors,
+working relative-time formatting, live 15s polling confirmed to update
+without reload, and both error paths (hard and soft) confirmed with
+screenshots. Found and fixed a real CORS bug that only browser-based
+testing could have caught. Survived a mid-session laptop reboot (corrupted
+npm caches, Docker Desktop down and relocated) by diagnosing each symptom
+rather than restarting from scratch. All three docs (`DESIGN.md`, root
+`README.md`, `dashboard/README.md`) reflect current state. Remaining:
+routing and the other three dashboard views (timeline, stats, recent
+activity).
