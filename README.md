@@ -9,11 +9,12 @@ backend, and a React dashboard — of which the backend is now complete.
 
 ## Architecture
 
-- **Agent** (Go, Windows) — tray shell built (status label, Pause/Resume,
-  Quit), no activity tracking yet; see [agent/README.md](agent/README.md).
-  Chosen for a small static binary and low idle memory footprint suited to
-  something that sits in the tray all day, plus direct Win32 API access
-  for foreground-window and idle detection without a wrapper runtime.
+- **Agent** (Go, Windows) — tray shell plus foreground-app/idle detection
+  built (logs to console; no network calls yet); see
+  [agent/README.md](agent/README.md). Chosen for a small static binary and
+  low idle memory footprint suited to something that sits in the tray all
+  day, plus direct Win32 API access for foreground-window and idle
+  detection without a wrapper runtime.
 - **Backend** (Node.js + TypeScript, Express 5, Prisma, PostgreSQL) —
   **complete**: receives activity data from the agent and serves it to the
   dashboard, all 8 contract endpoints built and tested.
@@ -63,9 +64,10 @@ Dashboard (admin auth):
 - `GET /api/v1/stats/activity-over-time`
 - `GET /api/v1/activity/recent`
 
-Agent: tray shell only (no tracking, no network calls) — see
-[agent/README.md](agent/README.md) for build/run instructions. Not yet
-built: the React dashboard.
+Agent: tray shell plus foreground-app/idle detection, logged to console
+for manual verification — no network calls, no segment construction/
+posting yet. See [agent/README.md](agent/README.md) for build/run
+instructions. Not yet built: the React dashboard.
 
 ## Known limitations
 

@@ -8,7 +8,7 @@ if it ever disagrees with a chat transcript, this file (and the code) wins.
 
 | Component | Stack | Status |
 |---|---|---|
-| Desktop agent | Go, Windows | Tray shell built (status label, Pause/Resume, Quit) — no activity tracking yet |
+| Desktop agent | Go, Windows | Tray shell + foreground-app/idle detection built (logs to console) — no network calls, no segment construction/posting yet |
 | Backend | Node.js + TypeScript, Express 5, Prisma, PostgreSQL | **Fully complete** — all 8 contract endpoints built and tested |
 | Dashboard | React + TypeScript | Not yet built |
 

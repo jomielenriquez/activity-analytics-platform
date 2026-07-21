@@ -1365,3 +1365,115 @@ cleaned up automatically via `go mod tidy`, `go vet` still clean, rebuilt
 and confirmed running. `DESIGN.md`'s agent-library rationale reflects the
 switch and its reasoning directly, with no stale "why getlantern" text
 left behind anywhere in currently-accurate documentation.
+
+### Prompt 26 (user, verbatim)
+
+> Add foreground application and idle-state detection to the agent, building on the existing tray skeleton. Still no network calls in this pass - just detect and log to console for now, so this can be verified in isolation before wiring it to the backend.
+>
+> Requirements:
+>
+> Foreground app detection: use GetForegroundWindow and GetWindowText (via golang.org/x/sys/windows or direct syscalls, your call on which) to get the current foreground window's title, and the owning process's executable name (e.g. chrome.exe, not just the window title).
+> Idle detection: use GetLastInputInfo to determine seconds since last keyboard/mouse input. Idle threshold should be a named constant in config.go alongside the three DESIGN.md timing constants already there - pick a reasonable default (5 minutes, matching what DESIGN.md's backend plan already assumed) and make it easy to find.
+> Poll on an interval (a new constant, something like 2-5 seconds is reasonable for detecting app switches responsively without hammering the OS) - not tied to HEARTBEAT_INTERVAL_SECONDS, which is about backend communication, not local polling. Explain this distinction in a comment so the two constants are not confused later.
+> Respect the Pause state from the existing tray skeleton - when paused, detection should stop running entirely, not just stop reporting. Log clearly when polling starts/stops due to pause/resume.
+> For now, on each poll, just log to console: current app name, window title, idle or active, and seconds since last input. No segment construction, no batching, no HTTP client yet - that is the next pass after this one.
+>
+> Write this so it is easy to manually verify: run it, switch between a few apps, watch the console output change accordingly, then leave the machine idle and confirm it flips to idle after the threshold.
+
+### Response 30 (assistant)
+
+Investigated what `golang.org/x/sys/windows` actually provides before
+writing any code, rather than assuming from memory — used `go doc` locally
+against the version already pulled in transitively via `fyne.io/systray`
+(more reliable than a web search, since it reflects the exact version this
+build would actually use). Confirmed via `go doc golang.org/x/sys/windows`:
+`GetForegroundWindow`, `GetWindowThreadProcessId`, `OpenProcess`,
+`QueryFullProcessImageName`, `CloseHandle`, and `UTF16ToString` are all
+already typed and wrapped there; `GetWindowTextW`, `GetLastInputInfo`, and
+`GetTickCount` are not. Used the wrapped versions where they exist and
+loaded the missing three directly via `windows.NewLazySystemDLL` — the
+same mechanism the `x/sys/windows` package uses internally for the
+functions it does wrap, so this isn't a workaround, it's the idiomatic
+extension pattern.
+
+Added `platform_windows.go` (the `_windows.go` suffix so Go's build
+constraints auto-exclude it on non-Windows GOOS, self-documenting that
+this file is genuinely platform-specific): `foregroundWindowInfo()`
+(title + base exe name, `ok=false` — not an error — when there's no
+foreground window or the owning process can't be queried, e.g. transient
+desktop-focus states or protected processes), and `idleSeconds()`.
+
+**One correctness detail worth being explicit about**: `idleSeconds()`
+deliberately uses `GetTickCount()` (32-bit), not `GetTickCount64()`, to
+match `LASTINPUTINFO.dwTime`'s type — subtracting in `uint32` keeps the
+arithmetic in defined, wrapping-safe territory across the ~49.7-day
+rollover both counters share, where mixing a 64-bit tick count against a
+32-bit `dwTime` would eventually produce a huge bogus idle value once the
+32-bit counter wrapped past the 64-bit one. Documented this as a comment
+directly on the subtraction, not just in this log.
+
+Added `tracker.go`'s `RunTracker(state *AgentState)`: polls on
+`PollIntervalSeconds`, and — per the explicit "stop running entirely, not
+just stop reporting" requirement — the paused branch `continue`s before
+ever calling `foregroundWindowInfo()`/`idleSeconds()`, not just before
+logging. Logs "polling started" once at boot and on every pause→resume
+transition, and "polling stopped" on every resume→pause transition (a
+`paused` bool tracks the edge so it doesn't spam a log line every tick
+while paused). Wired into `main.go` as `go RunTracker(state)` before
+`systray.Run(...)` — an independent goroutine touching only the
+mutex-guarded `AgentState`, no new shared-state risk.
+
+Extended `config.go` with `PollIntervalSeconds = 3` and
+`IdleThresholdSeconds = 5 * 60`, plus the requested comment distinguishing
+`PollIntervalSeconds` (local OS sampling) from `HeartbeatIntervalSeconds`
+(backend communication) directly on both constants, not just one.
+
+**Caught and resolved a real tension before it became a silent bug**: the
+previous pass deliberately built with `-ldflags="-H=windowsgui"` specifically
+to suppress the console window. But a GUI-subsystem process has no
+attached console, so `log.Println` output — which this entire pass exists
+to make visible for manual verification — would have gone nowhere. Flagged
+this explicitly rather than silently building either way: dropped
+`-H=windowsgui` for this build (plain `go build`, console-subsystem, so a
+console window appears and shows the tracker's output), documented why in
+`agent/README.md`, and noted the flag should return once verification
+moves off console output (either the next pass wiring to the backend, or a
+switch to file-based logging).
+
+Verified for real, not just compiled:
+- `go build` and `go vet ./...` — both clean.
+- Ran the built binary in the foreground for 10 real seconds and captured
+  actual output: `[tracker] polling started`, then three poll lines,
+  `idle=` climbing by exactly 3s each time (4s → 7s → 10s, matching
+  `PollIntervalSeconds`) — this also incidentally cross-checks the
+  `GetTickCount`/`dwTime` arithmetic, since a sign or unit error would show
+  up as zero, negative-wrapped, or erratic values instead of a clean +3s
+  per poll. Correctly identified the real foreground process as `Code.exe`
+  with its actual window title.
+- Confirmed via `tasklist` the process exits cleanly (the 10s timeout
+  killed it, nothing left running).
+- Did **not** attempt to automate the pause/resume or idle-threshold-flip
+  verification — the former needs a real tray click, the latter needs 5
+  real minutes of no input and there's no way to simulate genuine OS input
+  events or fast-forward time from here. Both are exactly what the user
+  asked to verify manually, so left them for that rather than faking a
+  result.
+- Updated `agent/README.md` with a new "Verifying foreground/idle
+  detection" section giving the exact manual steps (switch apps, go idle,
+  click Pause/Resume) and what output to expect at each one, plus updated
+  "Project layout" and "What's deliberately not here yet" to describe the
+  new files accurately instead of the stale tray-only description.
+  Updated `DESIGN.md`'s and root `README.md`'s agent status lines to match
+  (tray shell + detection, console-only, no network yet), keeping the
+  three docs in sync as established throughout this project.
+
+---
+
+**Outcome at end of session:** The agent now does real foreground-app and
+idle-state detection, verified live (not just compiled) against actual
+Windows APIs, logging to a visible console. Pause fully stops polling, not
+just reporting. `DESIGN.md`, root `README.md`, and `agent/README.md` all
+updated to reflect the current state accurately, including the
+console-vs-GUI-subsystem build tradeoff this pass required. Remaining for
+the agent: segment construction, batching, and the HTTP client to actually
+post to the backend — the next pass.
