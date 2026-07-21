@@ -2,12 +2,9 @@ import { randomBytes } from 'crypto';
 import { Router } from 'express';
 import { prisma } from '../db';
 import { hashApiKey } from '../middleware/auth';
+import { isNonEmptyString } from '../validation';
 
 export const devicesRouter = Router();
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
 
 // No dedup by device_name: every call creates a new device row, even if the
 // name matches an existing one. Known limitation, documented in the README

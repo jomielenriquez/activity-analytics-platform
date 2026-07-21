@@ -371,10 +371,173 @@ Verified end-to-end with the server actually running:
   just trusting the response body.
 - Stopped the background server afterward.
 
+### Prompt 10 (user, verbatim)
+
+> Build POST /api/v1/events, per the locked contract. Requirements:
+>
+> Auth: requireDeviceAuth middleware - reject with 401 if missing/invalid key, otherwise req.device is available.
+> Body: { agent_status: "running" | "paused", events: [...] }. events can be an empty array (heartbeat-only tick) - that's the normal case, not an error.
+> Each event: { client_segment_id, type: "active" | "idle", app_name?, window_title?, started_at, ended_at, duration_seconds }. Validate required fields per type - app_name/window_title required when type: "active", must be absent/null when type: "idle". 400 on malformed events, naming which field/index failed.
+> Pass window_title through redactWindowTitle() before insert (stub: truncate to 512 chars, per the plan).
+> Insert events using the (device_id, client_segment_id) unique constraint with ON CONFLICT DO NOTHING - use Prisma's createMany with skipDuplicates: true, or raw SQL if Prisma's API doesn't give enough control here. Track how many were actually inserted vs skipped as duplicates.
+> Update the device row: agent_status from the body, last_seen_at to now - always, even if events is empty.
+> Response: 202 { accepted: <n inserted>, duplicates: <n skipped> }.
+> Use the existing error handler — throw on unexpected failures.
+>
+> Don't touch the dashboard GET endpoints yet — just this one route.
+
+### Response 14 (assistant)
+
+Extracted `isNonEmptyString` (previously only defined inline in
+`routes/devices.ts`) into a new shared `src/validation.ts` and updated
+`devices.ts` to import it, rather than duplicating it in the new route —
+it's now used in two places, so sharing it was worth doing.
+
+Created `backend/src/routes/events.ts`:
+- `POST /` behind `requireDeviceAuth`.
+- Validates `agent_status` is exactly `'running'`/`'paused'` and `events`
+  is an array; 400 with `details: [...]` otherwise.
+- Per-event validation (`validateEvent`, index-aware): `client_segment_id`
+  must match a UUID-shaped regex (added beyond the literal spec — an
+  invalid UUID would otherwise hit Postgres as a raw `invalid input syntax
+  for type uuid` error surfaced as a 500 through the error handler instead
+  of a clean 400), `type` must be `'active'|'idle'`, `started_at`/`ended_at`
+  must parse as valid dates, `duration_seconds` a non-negative integer, and
+  `app_name`/`window_title` required-for-active / must-be-absent-for-idle
+  per the spec. On any invalid event, the **whole batch** is rejected with
+  400 and a `details` array naming every failing `events[i].field` (chose
+  all-or-nothing over partial-insert — simpler and avoids ambiguity about
+  which rows silently didn't make it in).
+- `redactWindowTitle(title, appName)` — pass-through/truncate-to-512 stub,
+  matching the plan's documented signature and seam.
+- Insert + device update wrapped in `prisma.$transaction(async (tx) => ...)`
+  (interactive transaction, not the array form — avoids TypeScript
+  heterogeneous-tuple friction from mixing a `createMany` and an `update`
+  in one `$transaction([...])` call) so a batch's segment inserts and the
+  device's `last_seen_at`/`agent_status` update commit or fail together.
+  `createMany({ skipDuplicates: true })` is skipped entirely when `events`
+  is empty (heartbeat-only tick) rather than called with an empty array.
+  `accepted` = `result.count`, `duplicates` = `rows.length - accepted`.
+- Mounted at `/api/v1/events` in `index.ts`.
+
+Verified against a live server (after killing a stale `node` process left
+over from the previous route's testing, same lesson as last time — checked
+`tasklist` showed exactly one instance before testing):
+1. Heartbeat-only tick (`events: []`) → `202 {"accepted":0,"duplicates":0}`.
+2. One valid `active` segment → `202 {"accepted":1,"duplicates":0}`.
+3. Immediate retry of the identical batch (same `client_segment_id`) →
+   `202 {"accepted":0,"duplicates":1}` — confirmed via direct Prisma query
+   that only one row actually exists for that `client_segment_id`, not two.
+4. `idle` event with `app_name` present → `400`, names
+   `events[0].app_name must be absent or null when type is 'idle'`.
+5. `active` event missing `window_title` → `400`, names the field.
+6. Mixed batch (valid idle at index 0, `type: "sleeping"` at index 1) →
+   `400`, names only `events[1].type`, and confirmed via a follow-up query
+   that index 0 was **not** inserted (all-or-nothing behavior working as
+   designed, not silently partial).
+7. No `Authorization` header → `401`.
+8. Garbage bearer token → `401 "Invalid device API key"`.
+9. 600-character `window_title` on an `active` event, submitted with
+   `agent_status: "paused"` → accepted; queried the row directly and
+   confirmed `windowTitle.length === 512` (truncated) and the device's
+   `agentStatus` flipped to `"paused"` with `lastSeenAt` updated to the
+   request time.
+10. Stopped the background server afterward.
+
 ---
 
-**Outcome at end of session:** `backend/` has a working `POST /api/v1/devices/register`
-route on top of the Express 5 skeleton and Prisma schema from earlier —
-verified against a live server and live Postgres, including the validation,
-success, and error-handler paths. `POST /events` and the dashboard `GET`
-endpoints remain the next pieces, per the plan's build order.
+**Outcome at end of session:** `backend/` now has both ingestion routes —
+`POST /api/v1/devices/register` and `POST /api/v1/events` — fully built and
+verified end-to-end against a live server and live Postgres: auth,
+per-field/per-index validation, idempotent dedup via the
+`(device_id, client_segment_id)` unique constraint, the window-title
+truncation stub, and the atomic segment-insert + device-liveness update.
+The dashboard `GET` endpoints are the remaining piece from the locked API
+contract.
+
+### Prompt 11 (user, verbatim, with an attached file)
+
+> I have a manual verification script at verify-events.ps1 that covers the test cases I want automated. Read it first, then convert its checks into a Vitest + Supertest suite at backend/src/routes/events.test.ts, preserving the same scenarios and assertions.
+
+Attached `verify-events.ps1` (not present in the repo — reference material
+only): a PowerShell script that hit a running `localhost:3000` server with
+`Invoke-RestMethod` and checked row-level state via
+`docker compose exec postgres psql`, covering 10 scenarios: heartbeat-only
+tick, valid active+idle batch, idempotent resend, conflicting resend
+(first-write-wins), atomic rejection of a mixed valid/invalid batch, missing
+auth, invalid auth, malformed UUID, window-title truncation, and
+agent_status/last_seen_at update from a heartbeat-only tick. Full script
+text is preserved as this turn's input; not reproduced here in full to
+avoid duplicating ~250 lines verbatim in the log.
+
+### Response 15 (assistant)
+
+Read the full script. Two structural problems for a direct port: (1)
+`index.ts` did `dotenv.config()` → env validation → built the Express `app`
+→ called `app.listen()` all in one module, so importing it for tests would
+either hit the real port or `process.exit(1)` on missing env vars — no way
+to get the `app` object in isolation; (2) the script assumed a server
+already running on `:3000` and shelled out to `docker compose exec postgres
+psql` for DB assertions, neither of which is necessary or desirable inside
+an automated suite.
+
+Fixed both structurally rather than working around them:
+- Split `index.ts` into `src/app.ts` (builds and exports the Express `app`,
+  no `listen()`) and a slimmer `index.ts` (env validation, then imports
+  `./app` and calls `.listen()`) — the same fail-fast-env-before-import
+  ordering as before, just with `app` construction factored out so
+  Supertest can drive it in-process without a real listening port.
+- Added `vitest`, `supertest`, `@types/supertest` as dev dependencies, plus
+  `npm test` (`vitest run`).
+- Added `vitest.setup.ts` (calls `dotenv.config()`) wired via
+  `vitest.config.ts`'s `setupFiles`, so `DATABASE_URL` is in `process.env`
+  before any test file's `import { app } from '../app'` pulls in Prisma —
+  more reliable than relying on import-statement ordering the way
+  `index.ts` does, since Vitest's Vite-based module loader hoists imports
+  (unlike `tsc`'s CommonJS emit), so that trick wouldn't have held here.
+- DB assertions use the already-imported `prisma` client directly
+  (`activitySegment.count`, `findFirst`, etc.) instead of shelling out to
+  `docker compose exec postgres psql` — same live database, no dependency
+  on the Docker CLI or `psql` being on PATH from inside the test run.
+- The device used for auth is registered for real via
+  `POST /devices/register` in `beforeAll` (through the app, not a param),
+  and `afterAll` deletes the segments then the device (FK is
+  `ON DELETE RESTRICT`) so repeated runs don't accumulate rows.
+
+Ported all 10 scenarios 1:1, preserving the same assertions, with one
+deliberate gap closed: the original script's scenario 10 was titled around
+both `agent_status` **and** `last_seen_at` but only ever queried
+`agent_status` — the `last_seen_at` check was written but never asserted.
+Added the missing assertion (`lastSeenAt` moved forward from a
+pre-request timestamp) since that's clearly what the scenario's own title
+intended to cover.
+
+Verified for real:
+- `npx tsc --noEmit` — clean.
+- `npm install` pulled in 66 packages; `npm audit` flagged 5 vulnerabilities
+  (1 critical, 1 high, 3 moderate), all the same transitive chain
+  (`esbuild` ≤0.24.2 via `vite` via `vitest`'s dev-server-reload feature —
+  GHSA-67mh-4wv8-2f99, "any website can send requests to the dev server and
+  read the response"). This only matters if `vite`'s dev server is running
+  and reachable from an untrusted network, which nothing in this project
+  does — `vitest` is only ever invoked as `vitest run` for one-shot test
+  execution, never as a long-running dev server. Fixing it requires
+  `vitest@4` (breaking change), which wasn't done unprompted. Flagged to
+  the user rather than silently upgraded or silently ignored.
+- `npm test` → all 10 tests pass against the live Postgres container.
+- Confirmed `afterAll` cleanup actually worked: queried for leftover
+  `EVENTS-VITEST` devices after the run, found 0.
+- Ran the full suite a second time back-to-back to confirm it's repeatable
+  (no leftover state from run 1 breaking run 2) — passed again, same 10/10.
+
+---
+
+**Outcome at end of session:** `backend/` has an automated integration test
+suite (`src/routes/events.test.ts`, run via `npm test`) covering
+`POST /api/v1/events` end-to-end against a live Postgres, replacing the
+manual `verify-events.ps1` workflow. Required a small structural split
+(`app.ts` vs `index.ts`) to make the Express app importable without side
+effects. One outstanding item raised, not yet resolved: `npm audit` reports
+5 vulnerabilities in vitest's dev-only transitive dependencies (low real
+risk here, but unresolved pending a decision on the `vitest@4` breaking
+upgrade).
