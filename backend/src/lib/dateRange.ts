@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { isValidDateString } from '../validation';
 
 export interface DateRangeResult {
@@ -31,4 +32,14 @@ export function parseDateRangeQuery(query: Record<string, unknown>): DateRangeRe
   }
 
   return { errors, from, to };
+}
+
+// Shared by any endpoint filtering activity_segments.started_at by an
+// already-parsed { from, to } (stats/summary, stats/top-apps,
+// devices/:id/timeline).
+export function buildStartedAtFilter(from?: Date, to?: Date): Prisma.DateTimeFilter | undefined {
+  if (!from && !to) {
+    return undefined;
+  }
+  return { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
 }

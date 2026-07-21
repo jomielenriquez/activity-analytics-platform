@@ -900,3 +900,87 @@ number named in the prompt), and points to `DESIGN.md` for everything it
 deliberately doesn't duplicate. Both docs remain in sync as of this
 session; next expected update to `README.md` is when the agent or
 dashboard get built.
+
+### Prompt 17 (user, verbatim)
+
+> Build GET /api/v1/devices/:id/timeline?from&to, requiring requireAdminAuth, per the contract in DESIGN.md.
+>
+> 404 if the device doesn't exist (same handling as GET /devices/:id).
+> from/to are optional ISO timestamps filtering activity_segments.started_at; if omitted, return all segments for the device.
+> Validate from/to are parseable dates if provided - 400 if not, matching the pattern used in stats/summary.
+> Return segments ordered by started_at ascending (chronological, since this is a timeline view - confirm this ordering makes sense for how the dashboard will render it, versus the descending order used in activity/recent).
+> Response shape: [{ client_segment_id, type, app_name, window_title, started_at, ended_at, duration_seconds }] - no need to include device_id since it's already scoped by the URL param.
+> No limit/pagination for this pass - a single device's segment history is bounded enough for take-home scope, but note this as a known limitation if the row count could get large (tie into the force-flush row growth limitation already documented).
+>
+> Write Vitest and Supertest tests: valid device with segments in and out of the date range (confirm exclusion works), a device with no segments (empty array response, not an error), the 404 case for a nonexistent device, and the from/to validation error case.
+>
+> Don't build activity-over-time yet - just this one endpoint.
+
+### Response 21 (assistant)
+
+Confirmed the ordering choice as asked rather than just implementing it
+silently: ascending is right for a timeline specifically because it's read
+left-to-right as a sequence of what happened, which is the opposite intent
+of `activity/recent`'s descending "most recent first" feed — noted this
+distinction directly in a code comment on the route.
+
+Refactored before adding the route, since two pieces were about to be
+needed a second/third time:
+- Extracted `findDeviceOrRespond404(id, res)` out of the inline logic in
+  `GET /:id` into a shared helper (isUuid check + lookup + 404, both
+  malformed and nonexistent ids treated identically), now used by both
+  `GET /:id` and the new `GET /:id/timeline`.
+- Moved `buildStartedAtFilter` out of `routes/stats.ts` into
+  `lib/dateRange.ts` alongside `parseDateRangeQuery`, since `devices.ts`
+  needed the same date-range-to-Prisma-filter logic — `stats.ts` now
+  imports the shared version instead of a local copy.
+
+Added `devicesRouter.get('/:id/timeline', ...)`: reuses
+`findDeviceOrRespond404`, then `parseDateRangeQuery` (400 with `details` on
+a malformed `from`/`to`, same pattern as `stats/summary`), then
+`activitySegment.findMany` ordered `startedAt: 'asc'`, mapped to the exact
+response shape requested (no `device_id` field, already implied by the
+URL). Added a comment tying the "no pagination" choice to the existing
+force-flush row-growth limitation, as asked, rather than treating it as a
+new standalone gap.
+
+**Type error caught by the IDE diagnostics hook, not by me first**: Express
+5's `req.params` type is `string | string[]` (broader than Express 4's
+plain `string`), which surfaced as a compile error on both call sites once
+`findDeviceOrRespond404(req.params.id, res)` was wired up. Fixed by
+widening the helper's parameter to `unknown` and letting `isUuid`'s
+`value is string` type-predicate do the narrowing — more correct than
+casting, since a real string array would now genuinely fail the `isUuid`
+check (→ `404`) instead of being force-cast and mishandled.
+
+Added a new `describe('GET /api/v1/devices/:id/timeline')` block to the
+existing `devices.test.ts` (same file as the other `devices.ts` routes,
+consistent with the one-file-per-route-module pattern already in place):
+admin-auth rejection, `404` for a nonexistent id, `400` for a malformed
+`from`, empty array (not an error) for a device with zero segments,
+ascending ordering confirmed explicitly, date-range exclusion (2033-dated
+fixtures, same far-future-date trick as `stats.test.ts`, though here it's
+mostly belt-and-suspenders since results are scoped by `device_id` in the
+URL and can't collide with other test files' data the way `stats/summary`'s
+global aggregates could), and a shape check confirming no `device_id` field
+leaks into the response.
+
+Verified for real:
+- `npx tsc --noEmit` — clean, including after the `req.params` fix.
+- Ran the existing suite first after the `findDeviceOrRespond404`/
+  `buildStartedAtFilter` refactor — still 38/38, no regression.
+- Full suite with the new tests: **45/45** passing.
+- Queried the DB directly after the run — 0 devices, 0 segments left over.
+- Updated `DESIGN.md` (marked the endpoint built, filled in its contract
+  entry, tied the pagination note into the existing force-flush
+  limitation) and `README.md` (moved the endpoint from "not yet built" to
+  "completed so far") so both stay in sync with the code, per the standing
+  goal from two turns ago of having one canonical doc rather than drift.
+
+---
+
+**Outcome at end of session:** `GET /api/v1/devices/:id/timeline` is
+built, tested (45/45 passing across five suites), and both `DESIGN.md` and
+`README.md` are updated to reflect it. Remaining from the locked contract:
+`GET /api/v1/stats/activity-over-time`, then the Go agent and React
+dashboard.

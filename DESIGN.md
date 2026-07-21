@@ -9,7 +9,7 @@ if it ever disagrees with a chat transcript, this file (and the code) wins.
 | Component | Stack | Status |
 |---|---|---|
 | Desktop agent | Go, Windows | Not yet built |
-| Backend | Node.js + TypeScript, Express 5, Prisma, PostgreSQL | Built: register, events ingestion, device list/detail, stats/summary, stats/top-apps, activity/recent |
+| Backend | Node.js + TypeScript, Express 5, Prisma, PostgreSQL | Built: register, events ingestion, device list/detail, device timeline, stats/summary, stats/top-apps, activity/recent |
 | Dashboard | React + TypeScript | Not yet built |
 
 **Why Go for the agent**: a lightweight, always-on native process that has
@@ -127,7 +127,7 @@ Response `202`: `{ accepted, duplicates }`.
 
 **`GET /devices/:id`** — same shape plus `created_at`. `404` for a nonexistent or malformed id.
 
-**`GET /devices/:id/timeline?from&to`** — *not yet built.*
+**`GET /devices/:id/timeline?from&to`** — `[{ client_segment_id, type, app_name, window_title, started_at, ended_at, duration_seconds }]`, ordered by `started_at` **ascending** (chronological) — deliberately the opposite of `activity/recent`'s descending order, since a timeline reads left-to-right as a sequence of what happened, not as a most-recent-first feed. `404` for a nonexistent or malformed device id (same handling as `GET /devices/:id`). No `device_id` field in the response — already scoped by the URL param. No limit/pagination this pass (see known limitations).
 
 **`GET /stats/summary?from&to`** — `{ active_device_count, total_active_seconds, total_idle_seconds }`. `from`/`to` optional ISO timestamps filtering `started_at`; omitted = all-time. `active_device_count` is devices with derived status `!== 'offline'` **right now** — explicitly not "devices with segments in [from, to]." These are different questions ("who's online" vs. "who was active in this window"); the date range only scopes the two duration sums.
 
@@ -150,7 +150,7 @@ Deliberately not fixed now — documented so they're a decision, not an oversigh
 
 1. **Device registration is unauthenticated.** Anything that can reach the backend can register a device and get an API key. A real deployment would gate this behind an install-time secret or admin approval step.
 2. **No dedup by `device_name` on `/register`.** Every call creates a new device row, even with a name matching an existing one.
-3. **Force-flushed segments generate a steady row count for long single-app sessions.** At `SEGMENT_MAX_DURATION_SECONDS = 300`, one continuous 8-hour session produces ~96 rows instead of 1. A real deployment at scale would want periodic compaction/rollup of same-app adjacent segments, not a longer flush interval (which would trade away dashboard freshness instead).
+3. **Force-flushed segments generate a steady row count for long single-app sessions.** At `SEGMENT_MAX_DURATION_SECONDS = 300`, one continuous 8-hour session produces ~96 rows instead of 1. A real deployment at scale would want periodic compaction/rollup of same-app adjacent segments, not a longer flush interval (which would trade away dashboard freshness instead). `GET /devices/:id/timeline` has no limit/pagination for the same reason this matters: it returns a device's *entire* segment history in one response, which is fine at take-home data volumes but would grow unbounded over a long retention period at the same rate this row-growth limitation describes — the fix is the same one (compaction/rollup), not pagination bolted onto an ever-growing raw table.
 4. **The agent's local retry queue has no documented cap.** If the backend is unreachable for an extended period, unsent segments accumulate in memory with no size/age limit or disk persistence.
 5. **`redactWindowTitle()` is a truncate-only stub.** It's the documented seam for real redaction (e.g. always blanking titles for known password managers) — not implemented, since window titles are logged in full per the assignment's explicit ask, with this as the acknowledged privacy tradeoff.
 6. **Test suite isolation is serialized (`fileParallelism: false`), not transactional.** The Vitest suite hits one shared, mutable Postgres database with no per-test rollback. A concrete bug this caused and fixed: `stats/summary`'s `active_device_count` test raced against a concurrently-running file's device heartbeat before this flag was added. Serializing file execution removes the *timing* race but not the underlying shared-mutable-state design — it doesn't protect against a crashed test skipping its cleanup and leaving dirty state for the next one. The more correct fix, per-test transaction rollback, would require routing the app's Prisma singleton (`db.ts`) through an ambient per-test transaction (a real refactor — `routes/events.ts` already opens its own nested `$transaction`, which would need savepoint handling), which is more surgery than this assignment's scope warrants right now.

@@ -1,19 +1,11 @@
 import { Router } from 'express';
-import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { requireAdminAuth } from '../middleware/auth';
 import { isUuid } from '../validation';
-import { parseDateRangeQuery } from '../lib/dateRange';
+import { buildStartedAtFilter, parseDateRangeQuery } from '../lib/dateRange';
 import { deriveDeviceStatus, getLatestSegmentTypeByDevice } from '../lib/deviceStatus';
 
 export const statsRouter = Router();
-
-function buildStartedAtFilter(from?: Date, to?: Date): Prisma.DateTimeFilter | undefined {
-  if (!from && !to) {
-    return undefined;
-  }
-  return { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
-}
 
 statsRouter.get('/summary', requireAdminAuth, async (req, res) => {
   const { errors, from, to } = parseDateRangeQuery(req.query as Record<string, unknown>);

@@ -54,13 +54,13 @@ Dashboard (admin auth):
 
 - `GET /api/v1/devices`
 - `GET /api/v1/devices/:id`
+- `GET /api/v1/devices/:id/timeline`
 - `GET /api/v1/stats/summary`
 - `GET /api/v1/stats/top-apps`
 - `GET /api/v1/activity/recent`
 
-Not yet built: `GET /api/v1/devices/:id/timeline`,
-`GET /api/v1/stats/activity-over-time`, the Go agent, and the React
-dashboard.
+Not yet built: `GET /api/v1/stats/activity-over-time`, the Go agent, and the
+React dashboard.
 
 ## Known limitations
 
