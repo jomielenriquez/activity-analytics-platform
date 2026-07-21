@@ -43,7 +43,7 @@ To use a real one: replace `assets/icon.ico` with your own `.ico` file
 - `main.go` — entrypoint; wires up `AgentState` and hands control to
   `systray.Run`.
 - `tray.go` — all tray/menu code (icon, menu items, click handlers). The
-  only file that imports `getlantern/systray`.
+  only file that imports `fyne.io/systray`.
 - `state.go` — `AgentState`: the Running/Paused state and its toggle,
   guarded by a mutex. This is the seam the next pass (activity tracking)
   will read from — `state.Current()` — without needing to know anything

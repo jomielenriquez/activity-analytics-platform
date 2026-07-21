@@ -1,6 +1,6 @@
 package main
 
-import "github.com/getlantern/systray"
+import "fyne.io/systray"
 
 func main() {
 	state := NewAgentState()

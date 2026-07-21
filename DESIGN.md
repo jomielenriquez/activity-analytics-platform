@@ -19,22 +19,33 @@ small static binary, low idle memory footprint, and direct OS API access
 Go compiles to exactly that without a runtime to bundle, unlike Electron or
 a managed-runtime alternative.
 
-**Why `getlantern/systray` for the tray UI**: it's a thin, actively-used
-cross-platform wrapper directly over each OS's native tray API (Win32
-Shell_NotifyIcon on Windows) — no bundled browser/runtime (rules out an
-Electron-style tray, which would contradict the whole reason for choosing
-Go in the first place), and no CGo/C toolchain requirement on Windows
-specifically (some Linux/macOS tray libraries need CGo bindings to
-GTK/Cocoa; systray's Windows backend is pure Win32 syscalls), which keeps
-the build a plain `go build` with no external C compiler dependency. The
-alternative of hand-rolling `Shell_NotifyIcon` calls directly via
+**Why `fyne.io/systray` for the tray UI**: it's a thin cross-platform
+wrapper directly over each OS's native tray API (Win32 Shell_NotifyIcon on
+Windows) — no bundled browser/runtime (rules out an Electron-style tray,
+which would contradict the whole reason for choosing Go in the first
+place), and no CGo/C toolchain requirement on Windows specifically (some
+Linux/macOS tray libraries need CGo bindings to GTK/Cocoa; systray's
+Windows backend is pure Win32 syscalls), which keeps the build a plain
+`go build` with no external C compiler dependency. The alternative of
+hand-rolling `Shell_NotifyIcon` calls directly via
 `golang.org/x/sys/windows` would remove the dependency entirely but adds
 real boilerplate (window class registration, message loop, icon resource
 handling) for a first pass that's explicitly meant to be minimal.
-`systray`'s tradeoff is real, though: it's a small, low-activity project
-(last tagged release predates this project), so it's a reasonable choice
-for a take-home, not necessarily what would get picked for a
-production agent expected to track OS API changes over years.
+
+This project started on `getlantern/systray`, the original and
+better-known of the two, then switched after a maintenance check:
+`getlantern/systray` hadn't been pushed to since July 2024 (2 years stale)
+with 114 open issues; `fyne.io/systray` — a fork maintained under the
+actively-developed Fyne GUI toolkit project — had merged PRs as recently
+as June 2026 and far fewer open issues (13) relative to its smaller but
+real community. The two are near-drop-in-compatible (identical
+`systray.Run`/`SetIcon`/`AddMenuItem`/`ClickedCh` API, differing only in
+import path), so the switch was a two-line import change plus a
+`go mod tidy` and cost nothing in `tray.go`'s actual logic — confirmed by
+rebuilding and reconfirming `go vet ./...` clean, not just assumed. That
+near-zero swap cost was itself part of the decision: it's cheap now, before
+any tracking logic depends on it, and would only get more expensive to
+reconsider later.
 
 ## Data model (PostgreSQL, via Prisma)
 

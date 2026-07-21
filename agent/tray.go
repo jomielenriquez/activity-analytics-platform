@@ -3,7 +3,7 @@ package main
 import (
 	_ "embed"
 
-	"github.com/getlantern/systray"
+	"fyne.io/systray"
 )
 
 // Placeholder icon: a solid orange circle, deliberately bright and simple

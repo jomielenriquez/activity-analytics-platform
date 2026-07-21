@@ -1282,3 +1282,86 @@ icon, Pause→Resume toggle, Quit). No activity tracking, no network calls,
 per the explicit scope of this pass. `DESIGN.md` and `README.md` both
 updated to reflect the agent's real current status rather than staying
 stale.
+
+### Prompt 24 (user, verbatim)
+
+> Given the low-activity caveat on getlantern/systray - is there a known, actively maintained alternative that would be a safer choice, or is this genuinely the best option in the Go ecosystem for this use case right now? I don't need to switch, just want an honest answer before I build tracking logic on top of it.
+
+### Response 28 (assistant)
+
+Loaded the WebSearch/WebFetch tools and used `curl` against GitHub's public
+API directly (no auth needed for public repo metadata) rather than
+answering from training-data memory, since "actively maintained" is
+exactly the kind of claim that goes stale. Checked three repos:
+`getlantern/systray` (3,720 stars, but last pushed **July 2024** — 2 years
+stale, 114 open issues), `fyne-io/systray` (358 stars, last pushed
+**June 2026**, only 13 open issues, backed by the actively-developed Fyne
+GUI toolkit project), and `energye/systray` (180 stars, January 2026,
+much smaller community — ruled out as a distant third). Verified
+`fyne-io/systray`'s actual recent commits (not just the push timestamp)
+were real merged PRs — a dbus submenu fix, a channel-closed fix, a macOS
+menu-positioning fix — and fetched its README/go.mod directly to confirm
+the API surface (`systray.Run`, `SetIcon`, `AddMenuItem`) and import path
+(`fyne.io/systray`) before claiming it was a near-drop-in replacement,
+rather than assuming from the fact that it's a fork.
+
+Gave an honest verdict rather than a hedge: `fyne-io/systray` is the
+safer maintenance choice, the swap cost is close to zero right now (before
+tracking logic depends on it), so leaned toward recommending the switch —
+while being upfront that `getlantern/systray` still has far more
+historical production usage as a counterweight. Left the actual decision
+to the user, per their explicit "I don't need to switch."
+
+### Prompt 25 (user, verbatim)
+
+> Switch the agent from getlantern/systray to fyne-io/systray, per the maintenance comparison. Update the import path and go.mod, verify tray.go's logic needs no other changes as you predicted, rebuild, and confirm go vet is still clean. Update DESIGN.md's agent section to reflect the switch and the reasoning (maintenance status, near-identical API, near-zero swap cost at this point in the build) - replace the old getlantern rationale rather than layering a correction on top of it.
+
+### Response 29 (assistant)
+
+Stopped the previously-running `agent.exe` (already exited on its own —
+likely quit via its own tray menu during the user's earlier check).
+Changed exactly two lines: the import in `tray.go` and in `main.go`, from
+`"github.com/getlantern/systray"` to `"fyne.io/systray"` — nothing else in
+either file, confirming the prediction from the previous turn rather than
+just asserting it. `go get fyne.io/systray@latest` + `go mod tidy` pulled
+in `fyne.io/systray` and its two real dependencies and dropped the entire
+`getlantern/systray` transitive tree (golog, ops, hidden, errors, hex,
+context, go-stack, oxtoacart, testify) from `go.mod` automatically.
+
+Rebuilt with the same `-ldflags="-H=windowsgui"` flag as before (confirmed
+via `file` it's still GUI-subsystem, not console) and reran
+`go vet ./...` — clean. Launched the rebuilt binary and confirmed via
+`tasklist` it starts without crashing; incidentally used notably less
+memory at the same ~2s-after-launch checkpoint (13MB vs. 51MB for the
+`getlantern` build) — mentioned this to the user as an observed data point
+from one sample, not a claimed benchmark result.
+
+Grepped the whole repo for remaining `getlantern` references before
+declaring this done, rather than assuming the two edited files were the
+only places it appeared. Found it in three kinds of places and treated
+them differently: `AI_USAGE.md`'s historical log entries and verbatim
+prompt quotes were left untouched (correctly — they're a record of what
+was actually asked/done at the time, not meant to be retroactively
+"corrected"); `DESIGN.md`'s two remaining mentions were intentional, part
+of documenting the switch itself; `agent/README.md`'s "only file that
+imports `getlantern/systray`" was a genuine stale current-state claim and
+got fixed to `fyne.io/systray`.
+
+Replaced (not layered onto) `DESIGN.md`'s "Why `getlantern/systray`"
+section with "Why `fyne.io/systray`," per the explicit instruction: kept
+the parts of the original reasoning that still hold (thin native wrapper,
+no bundled runtime, no CGo requirement on Windows, vs. hand-rolling
+`Shell_NotifyIcon` directly), replaced the "low-activity" caveat with the
+actual comparison data from the previous turn (push dates, open-issue
+counts, Fyne backing), and added the switch history and near-zero-cost
+reasoning as the user asked, framed as why the decision was made, not as
+an apology for the earlier choice.
+
+---
+
+**Outcome at end of session:** The agent now uses `fyne.io/systray`
+instead of `getlantern/systray` — a two-line import change, `go.mod`
+cleaned up automatically via `go mod tidy`, `go vet` still clean, rebuilt
+and confirmed running. `DESIGN.md`'s agent-library rationale reflects the
+switch and its reasoning directly, with no stale "why getlantern" text
+left behind anywhere in currently-accurate documentation.
