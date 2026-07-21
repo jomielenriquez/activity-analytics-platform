@@ -4,3 +4,7 @@ build/
 .env
 .env.local
 *.log
+
+# Go
+agent/*.exe
+agent/agent

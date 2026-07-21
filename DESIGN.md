@@ -8,7 +8,7 @@ if it ever disagrees with a chat transcript, this file (and the code) wins.
 
 | Component | Stack | Status |
 |---|---|---|
-| Desktop agent | Go, Windows | Not yet built |
+| Desktop agent | Go, Windows | Tray shell built (status label, Pause/Resume, Quit) — no activity tracking yet |
 | Backend | Node.js + TypeScript, Express 5, Prisma, PostgreSQL | **Fully complete** — all 8 contract endpoints built and tested |
 | Dashboard | React + TypeScript | Not yet built |
 
@@ -18,6 +18,23 @@ small static binary, low idle memory footprint, and direct OS API access
 (`GetForegroundWindow`, `GetWindowText`, `GetLastInputInfo` on Windows) —
 Go compiles to exactly that without a runtime to bundle, unlike Electron or
 a managed-runtime alternative.
+
+**Why `getlantern/systray` for the tray UI**: it's a thin, actively-used
+cross-platform wrapper directly over each OS's native tray API (Win32
+Shell_NotifyIcon on Windows) — no bundled browser/runtime (rules out an
+Electron-style tray, which would contradict the whole reason for choosing
+Go in the first place), and no CGo/C toolchain requirement on Windows
+specifically (some Linux/macOS tray libraries need CGo bindings to
+GTK/Cocoa; systray's Windows backend is pure Win32 syscalls), which keeps
+the build a plain `go build` with no external C compiler dependency. The
+alternative of hand-rolling `Shell_NotifyIcon` calls directly via
+`golang.org/x/sys/windows` would remove the dependency entirely but adds
+real boilerplate (window class registration, message loop, icon resource
+handling) for a first pass that's explicitly meant to be minimal.
+`systray`'s tradeoff is real, though: it's a small, low-activity project
+(last tagged release predates this project), so it's a reasonable choice
+for a take-home, not necessarily what would get picked for a
+production agent expected to track OS API changes over years.
 
 ## Data model (PostgreSQL, via Prisma)
 

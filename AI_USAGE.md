@@ -1183,3 +1183,102 @@ evidence (generated-type inspection + a live runtime check, not just
 assertion from memory), that the `bigint`/`JSON.stringify` risk fixed in
 `activity-over-time` is isolated to raw SQL aggregates and doesn't affect
 `stats/summary` or `stats/top-apps`. No code changes this turn.
+
+### Prompt 23 (user, verbatim)
+
+> Set up a new Go project at agent/ for a Windows desktop tray application. This is the first pass - just the visible tray shell with pause/stop, no activity tracking yet.
+>
+> Requirements:
+>
+> Use getlantern/systray for the tray icon and menu.
+> Tray menu items: a status label showing current state (Running / Paused), a "Pause" / "Resume" toggle item that flips between the two, and a "Quit" item that cleanly exits the process.
+> Use a simple, clearly visible icon so it is obvious this is running - not something that blends into the tray unnoticed. If you do not have a real icon asset, use a basic placeholder and tell me how to swap it later.
+> No network calls, no OS activity APIs (no GetForegroundWindow, no GetLastInputInfo) in this pass - purely the tray shell and its state toggle.
+> Structure the project for what comes next: a config.go for constants (this is where HEARTBEAT_INTERVAL_SECONDS, OFFLINE_THRESHOLD_SECONDS, SEGMENT_MAX_DURATION_SECONDS from DESIGN.md will eventually live), and a clear separation between the tray/UI code and where tracking logic will be added later - do not build the tracking logic itself yet, just leave the seam obvious.
+> Include a go.mod with a module name, and a README note in agent/ (separate from the root README) covering how to build and run it locally on Windows.
+>
+> Explain briefly why getlantern/systray is a reasonable choice here versus alternatives, for the DESIGN.md agent section.
+>
+> This is intentionally minimal - I want to see the tray icon, click Pause, see it flip to Resume, and Quit cleanly, before any real tracking logic gets added on top.
+
+### Response 27 (assistant)
+
+Checked for Go first — not installed anywhere on the machine (same
+situation as Docker at the very start of the backend work). Asked via
+AskUserQuestion rather than assuming how to proceed; the user installed Go
+1.26.5 mid-conversation. It wasn't yet on this shell's `PATH` (installer
+PATH updates don't reach an already-running shell), so found it directly
+at `/c/Program Files/Go/bin/go.exe` and referenced that explicitly for
+every subsequent command rather than assuming a fresh shell would pick it
+up.
+
+**Icon**: no real asset provided, so generated a placeholder rather than
+skipping it or using a bundled generic one — wrote a small stdlib-only Go
+program (`image`, `image/color`, `image/png`, no external deps) that draws
+a solid bright-orange circle with a dark border on a transparent 32×32
+canvas, PNG-encodes it, and wraps it in a minimal hand-built ICO container
+(ICONDIR + ICONDIRENTRY pointing at the raw PNG bytes — Vista+ ICO format
+allows embedding PNG data directly, avoiding hand-rolling a BMP pixel
+array). Ran it and verified with `file` that the output is a genuine
+recognized Windows icon resource, not just "a file with a .ico extension."
+Chose solid/saturated over anything subtle specifically per the "not
+something that blends into the tray unnoticed" requirement.
+
+**Structure**, matching the requested seam explicitly:
+- `config.go` — the three named constants from DESIGN.md, including
+  `OfflineThresholdSeconds` with a comment noting it's actually enforced
+  server-side, not by the agent, but included anyway since the user
+  explicitly asked for all three to live here.
+- `state.go` — new `AgentState` type (Running/Paused, mutex-guarded
+  `Current()`/`Toggle()`) — this is the actual seam: the future tracking
+  loop reads `Current()` without knowing about the tray, and the tray
+  doesn't know about tracking. Field names chosen to mirror the backend's
+  `agent_status` values directly (`'running'`/`'paused'`).
+- `tray.go` — the only file importing `getlantern/systray`; menu
+  construction, click-handler loop, `//go:embed assets/icon.ico`.
+- `main.go` — thin entrypoint wiring `AgentState` to `systray.Run`.
+
+`go get github.com/getlantern/systray@latest`, `go mod tidy`, and
+`go build` all succeeded. **Caught one real issue before it shipped**: the
+default build produced a console-subsystem binary (confirmed via `file`:
+"PE32+ ... (console)") — meaning a console window would pop up alongside
+the tray icon every launch, undermining the whole "tray-only" UX.
+Rebuilt with `-ldflags="-H=windowsgui"` and reconfirmed via `file` that the
+binary is now GUI-subsystem. Documented the flag (and why it matters) in
+`agent/README.md`'s build instructions rather than leaving it as a thing
+the user would have to discover themselves. `go vet ./...` also clean.
+
+Launched the built `agent.exe` in the background and confirmed via
+`tasklist` that it's still running a couple seconds later (didn't crash on
+startup) — left it running rather than killing it, since the user
+explicitly said they want to personally click the tray icon, see Pause
+flip to Resume, and Quit, before anything more gets built on top; that's
+not something verifiable through this tool without a screen.
+
+Updated `.gitignore` for `agent/*.exe`/`agent/agent` (build artifacts
+shouldn't be committed — same reasoning as `dist/`/`node_modules/`
+already there for the backend). Updated `DESIGN.md`: the Components table
+row for the agent, plus a new "Why `getlantern/systray`" paragraph
+covering the requested comparison — direct native tray API wrapper vs. an
+Electron-style bundled-runtime tray (would contradict the reason Go was
+chosen at all) vs. hand-rolling `Shell_NotifyIcon` via
+`golang.org/x/sys/windows` directly (removes the dependency but adds real
+boilerplate not warranted for a minimal first pass) — plus an honest
+caveat that `systray` itself is a low-activity project, a reasonable
+tradeoff for a take-home but not necessarily what a production agent
+expected to track OS changes over years would pick. Also updated
+`README.md`'s architecture/status sections to match, linking to
+`agent/README.md`, even though only the `DESIGN.md` update was explicitly
+requested — kept doing this because leaving `README.md` saying "not yet
+built" while `DESIGN.md` says "tray shell built" would be exactly the kind
+of doc drift this project has been actively avoiding.
+
+---
+
+**Outcome at end of session:** `agent/` now has a working Go tray shell —
+builds clean as a proper GUI-subsystem binary, `agent.exe` is currently
+running in the background for the user's own visual verification (tray
+icon, Pause→Resume toggle, Quit). No activity tracking, no network calls,
+per the explicit scope of this pass. `DESIGN.md` and `README.md` both
+updated to reflect the agent's real current status rather than staying
+stale.
