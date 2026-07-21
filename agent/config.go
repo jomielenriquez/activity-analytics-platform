@@ -1,16 +1,26 @@
 package main
 
+// Backend connection. Change this to point the agent at a different
+// environment (staging, a teammate's local backend, etc.) — this is the
+// only place it's defined.
+const BackendURL = "http://localhost:3000"
+
+// DeviceConfigPath is where registered device credentials (device_id +
+// api_key) are persisted between runs, resolved relative to the
+// executable's own directory (not the current working directory, which
+// varies depending on how the agent gets launched — double-click, a
+// shortcut, or Windows startup). Gitignored; see device.go.
+const DeviceConfigFileName = "device.json"
+
 // Timing constants from DESIGN.md's "Timing constants" section — kept in
-// sync with the backend's contract. HeartbeatIntervalSeconds and
-// SegmentMaxDurationSeconds aren't used yet (no event-posting/segment
-// code exists this pass); this is where that code will read them from
-// once built.
+// sync with the backend's contract.
 const (
 	// HeartbeatIntervalSeconds is the agent's tick cadence for talking to
-	// the *backend*: how often it pings/flushes to POST /api/v1/events,
-	// regardless of activity. Not to be confused with PollIntervalSeconds
-	// below, which governs local OS polling — see that constant's comment
-	// for why they're deliberately separate.
+	// the *backend*: how often it POSTs to /api/v1/events — whatever
+	// segments are queued (often none) plus the current agent_status,
+	// which is also this agent's liveness ping. Not to be confused with
+	// PollIntervalSeconds below, which governs local OS polling — see that
+	// constant's comment for why they're deliberately separate.
 	HeartbeatIntervalSeconds = 30
 
 	// OfflineThresholdSeconds is enforced server-side (see
@@ -29,11 +39,11 @@ const (
 	// foreground window and idle time *locally*. This is a different
 	// concern from HeartbeatIntervalSeconds above: that one is about how
 	// often the agent talks to the backend; this one is about how often it
-	// samples the OS to detect an app switch responsively. A later pass
-	// will accumulate polled samples into segments in memory and flush
-	// those to the backend on the heartbeat cadence, not the poll cadence
-	// — the two constants serve different layers and shouldn't be merged
-	// or confused with each other.
+	// samples the OS to detect an app switch responsively. Polled samples
+	// are accumulated into segments in memory and flushed to the backend
+	// on the heartbeat cadence, not the poll cadence — the two constants
+	// serve different layers and shouldn't be merged or confused with each
+	// other.
 	PollIntervalSeconds = 3
 
 	// IdleThresholdSeconds: no keyboard/mouse input for at least this long

@@ -8,3 +8,4 @@ build/
 # Go
 agent/*.exe
 agent/agent
+agent/device.json

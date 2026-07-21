@@ -1,14 +1,15 @@
 # Activity Analytics Agent
 
 Windows system-tray agent. Current state: the tray shell (status label,
-Pause/Resume toggle, Quit) plus foreground-app and idle-state detection,
-logged to the console for manual verification. No network calls, no
-segment construction/batching yet; see [DESIGN.md](../DESIGN.md) for what's
-planned on top of this.
+Pause/Resume toggle, Quit), foreground-app/idle-state detection, and now
+segment construction + batching + posting to the backend — this is fully
+wired end-to-end. See [DESIGN.md](../DESIGN.md) for the full contract.
 
 ## Build and run (Windows)
 
-Requires Go 1.21+ (developed against 1.26.5).
+Requires Go 1.21+ (developed against 1.26.5), and the backend running
+(see the [root README](../README.md)) — the agent registers itself and
+posts to it on startup.
 
 ```
 cd agent
@@ -18,14 +19,12 @@ go build -o agent.exe .
 ```
 
 This build is **console-subsystem** (no `-ldflags="-H=windowsgui"`)
-deliberately, for now: the tracking output below is only useful if you can
+deliberately, for now: the log output below is only useful if you can
 actually see it, and a GUI-subsystem binary has no attached console to
 print to. A console window will appear alongside the tray icon while this
-is the case. Once tracking is verified and wired to the backend (posting
-over HTTP instead of printing), console output stops being the way this
-gets checked, and `-ldflags="-H=windowsgui"` (documented in the earlier
-version of this file / git history) should come back for a quiet,
-tray-only build.
+is the case; `-ldflags="-H=windowsgui"` should come back for a quiet,
+tray-only build once console output is no longer how this gets verified
+(e.g. once there's a dashboard to check instead).
 
 You should see a bright orange circular icon appear in the system tray
 (may be in the hidden-icons overflow area — check there if it's not
@@ -58,6 +57,42 @@ To verify it's real, not static:
   and confirm `[tracker] resumed — polling started` followed by polling
   picking back up.
 
+## Verifying registration, segments, and posting
+
+**First run** (no `device.json` present yet) should log something like:
+```
+[device] no stored credentials — registering as device_name=YOUR-PC user_identifier=YOUR-PC\you
+[device] registered new device_id=..., saved to C:\...\agent\device.json
+```
+**Every run after that** should instead log `[device] loaded existing
+credentials from ...` — confirms it's not silently re-registering a new
+device every launch. Delete `device.json` to force a fresh registration.
+
+**Switch apps a couple of times** and watch for:
+```
+[tracker] segment closed and queued: id=... type=active app="chrome.exe" duration=8s
+```
+— one of these per app switch or active/idle transition, per DESIGN.md's
+segment model.
+
+**Every `HeartbeatIntervalSeconds` (30s)**, regardless of whether anything
+closed, you should see:
+```
+[sender] sending 2 segment(s), agent_status=running
+[sender] batch sent: accepted=2 duplicates=0
+```
+(`sending 0 segment(s)` is normal and expected on most ticks — it's still
+a real POST, since it's also the liveness ping.) Check the dashboard
+`GET /api/v1/devices/:id/timeline` endpoint, or query Postgres directly,
+to confirm segments actually landed — the accepted/duplicates counts alone
+only prove the backend *responded*, not that the data is correct.
+
+**Stop the backend** (or point `BackendURL` in `config.go` at a
+nonexistent one) and confirm `[sender] send failed, N segment(s) remain
+queued for next tick` — then restart the backend and confirm the same
+segments go out and get accepted on a later tick, proving the queue
+survives a failed send rather than dropping data.
+
 ## Swapping the placeholder icon
 
 `assets/icon.ico` is a generated placeholder — a solid orange circle,
@@ -77,30 +112,44 @@ To use a real one: replace `assets/icon.ico` with your own `.ico` file
   `tracker.go` reads `state.Current()` every poll without knowing
   anything about the tray/menu code, and the tray code doesn't know
   anything about tracking.
-- `config.go` — timing constants: the three from DESIGN.md
-  (`HeartbeatIntervalSeconds`, `OfflineThresholdSeconds`,
-  `SegmentMaxDurationSeconds`, still unused — for the next pass) plus two
-  local ones actually used by the tracker now: `PollIntervalSeconds` (how
-  often the tracker samples the OS locally — a different concern from
-  `HeartbeatIntervalSeconds`, see the comment on that constant) and
-  `IdleThresholdSeconds` (5 minutes of no input = idle).
+- `config.go` — all the timing/connection constants, all now used:
+  `BackendURL`, `DeviceConfigFileName`, the three from DESIGN.md
+  (`HeartbeatIntervalSeconds`, `OfflineThresholdSeconds` — this one is
+  backend-only, kept here for reference — `SegmentMaxDurationSeconds`),
+  plus `PollIntervalSeconds` and `IdleThresholdSeconds`.
 - `platform_windows.go` — the Win32 syscalls (`GetForegroundWindow`,
   `GetWindowTextW`, `GetWindowThreadProcessId`,
   `QueryFullProcessImageName`, `GetLastInputInfo`, `GetTickCount`). The
   only file that touches raw Windows APIs directly; `_windows.go` suffix
   so it's automatically excluded from non-Windows builds.
 - `tracker.go` — the polling loop: reads `AgentState`, calls into
-  `platform_windows.go`, logs to console. No segment construction, no
-  HTTP client — see below.
+  `platform_windows.go`, logs to console, and feeds each observation into
+  a `SegmentBuilder`. Closed segments go onto a `SegmentQueue`.
+- `segment.go` — `Segment`, `SegmentBuilder` (the poll-stream → segments
+  state machine: transitions, app switches, the `SegmentMaxDurationSeconds`
+  force-flush) and `SegmentQueue` (the mutex-guarded, in-memory,
+  unsent-segment queue shared between the tracker and sender goroutines).
+  Covered by `segment_test.go`.
+- `device.go` — `DeviceCredentials`, and load-or-register-and-persist
+  logic against `device.json` (gitignored), resolved relative to the
+  executable's own directory rather than the current working directory.
+- `backend.go` — the HTTP client: `registerDevice` and `postEvents`,
+  matching the backend's exact JSON contract (including sending `null`,
+  not `""`, for `app_name`/`window_title` on idle segments — the backend
+  rejects an empty string as neither absent nor null).
+- `sender.go` — the heartbeat loop: POSTs whatever's queued every
+  `HeartbeatIntervalSeconds`, regardless of pause state (see that file's
+  comment for why pause doesn't stop this loop the way it stops
+  `tracker.go`'s).
 - `assets/icon.ico` — the tray icon, embedded into the binary at compile
   time.
 
 ## What's deliberately not here yet
 
-No HTTP client, no event batching, no segment construction (turning raw
-poll samples into the `{ client_segment_id, type, started_at, ended_at,
-duration_seconds }` shape the backend's `POST /events` expects), no
-posting to the backend at all. Those land in the next pass, consuming the
-same `foregroundWindowInfo()`/`idleSeconds()` calls this pass already logs,
-plus `HeartbeatIntervalSeconds` and `SegmentMaxDurationSeconds` from
-`config.go`, which are still unused today.
+Nothing from the core ingestion path — the agent now registers, tracks,
+batches, and posts. Not yet here: any resilience beyond "retry on the next
+tick" (no capped/bounded queue — see DESIGN.md's known limitations on the
+agent's unbounded retry queue), no persisting the queue across restarts
+(an unsent segment surviving a crash or a manual restart is lost — the
+in-memory queue is exactly that, in-memory), and no UI feedback in the
+tray itself about send failures (only the console shows them).

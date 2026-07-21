@@ -1477,3 +1477,141 @@ updated to reflect the current state accurately, including the
 console-vs-GUI-subsystem build tradeoff this pass required. Remaining for
 the agent: segment construction, batching, and the HTTP client to actually
 post to the backend — the next pass.
+
+### Prompt 27 (user, verbatim)
+
+> Add segment construction, batching, and HTTP posting to the agent, building on the existing polling loop. This wires the agent to the backend for the first time.
+>
+> Requirements:
+>
+> Convert the raw poll stream into segments: a segment starts when the active/idle state changes, or when the foreground app changes while active (app switch = new segment, per the "one row per app switch or idle transition" model in DESIGN.md). Track started_at when a segment begins; compute duration_seconds and ended_at when it closes.
+> Apply SEGMENT_MAX_DURATION_SECONDS: if a segment has been open that long without a natural transition, force-close it and immediately open a new one with the same app/state, per DESIGN.md's documented behavior.
+> Generate a client_segment_id (UUID) when each segment starts, not when it closes - matches the backend's idempotency design.
+> Maintain an in-memory queue of closed, unsent segments.
+> On a HEARTBEAT_INTERVAL_SECONDS ticker, POST to /api/v1/events with agent_status (from the pause state) and whatever segments are currently queued (empty array is fine and expected on most ticks, matching the backend contract).
+> On a successful response (2xx), clear the sent segments from the queue. On failure (network error, non-2xx), leave them queued for the next tick - this is the retry behavior DESIGN.md already assumes server-side idempotency handles.
+> Device registration: on first run, if no stored device_id/api_key exists (check a local config file, e.g. agent/device.json, gitignored), call /api/v1/devices/register once and persist the response. On subsequent runs, load and reuse the stored credentials instead of re-registering.
+> Backend URL should be a constant in config.go, easy to find and change (e.g. for pointing at a different environment later).
+> Log clearly: when a segment closes and is queued, when a batch is sent, how many were accepted/duplicates from the response, and any send failures.
+>
+> This is a meaningful chunk - if it's cleaner to split device registration into its own pass before batching/sending, say so and propose the split rather than doing everything at once.
+
+### Response 31 (assistant)
+
+Weighed the split explicitly rather than silently picking: decided **not**
+to split, since device registration is small (check file → one HTTP call
+→ save file) and testing the queue/batching logic in isolation would need
+mocked credentials anyway — building it together meant the whole
+register → poll → build segment → batch → POST flow could be verified
+end-to-end against the real backend, which is more convincing than testing
+the pieces separately. Stated this reasoning to the user before proceeding
+rather than just doing it.
+
+Re-verified the exact backend contract field names directly from
+`events.ts`/`devices.ts` before writing any client code (not from memory),
+and checked `google/uuid`'s maintenance status via the GitHub API (same
+rigor as the systray comparison) before deciding **against** adding it —
+last pushed Nov 2024, but treated that differently from `getlantern/systray`'s
+staleness, since a UUID generator implementing a fixed spec doesn't need
+ongoing maintenance the way OS-integration code does. Hand-rolled RFC 4122
+v4 generation instead (~8 lines over `crypto/rand`), keeping the agent's
+dependency count at two.
+
+New files:
+- `segment.go` — `SegmentBuilder` (the poll-stream → segments state
+  machine) and `SegmentQueue`. One interpretive decision made explicit in
+  a comment: DESIGN.md only specifies activity-state and app-switch as
+  segment boundaries, not title changes — so a title change alone keeps
+  the same segment open, but the open segment's recorded title is kept
+  updated to the *latest* observed value rather than frozen at whatever it
+  was when the segment opened.
+- `backend.go` — `registerDevice`/`postEvents` HTTP client. Used `*string`
+  (not plain `string` with `omitempty`) for `app_name`/`window_title` so
+  idle segments send `null`/absent rather than `""` — confirmed by reading
+  `events.ts` that an empty string is rejected identically to a missing
+  field, so `omitempty` on a plain string wouldn't have been safe here.
+- `device.go` — load-or-register-and-persist, resolving `device.json`'s
+  path via `os.Executable()` + `filepath.Dir()` rather than a bare
+  relative path, specifically so it doesn't silently re-register a new
+  device every launch if the agent's working directory ever varies (e.g.
+  launched via Windows startup instead of a terminal in `agent/`).
+- `sender.go` — the heartbeat loop. Deliberately runs regardless of pause
+  state, unlike `tracker.go`'s polling loop — explained in a comment why:
+  `POST /events` is also the liveness ping and the only way the backend
+  learns `agent_status` is `"paused"` rather than reading as `"offline"`
+  once `last_seen_at` goes stale, so stopping this loop on pause would
+  break exactly the paused-vs-offline distinction DESIGN.md defines.
+- `main.go` — registration failure at startup is logged, not fatal: the
+  tray still starts (so the agent stays visible/stoppable even if the
+  backend isn't up yet), and `sender.go` retries registration on every
+  heartbeat tick until it succeeds, rather than requiring a restart once
+  the backend becomes reachable.
+
+**Found and fixed a real bug via live testing, not synthetic tests**: the
+first end-to-end run hit `400 Bad Request:
+"events[1].window_title is required when type is 'active'"` — a real
+foreground process (`OpenWith.exe`, encountered when launching Notepad
+triggered a file-association dialog rather than Notepad directly)
+legitimately had an empty window title, and the backend rejects `""` as
+neither absent nor null for an active segment. Fixed in `tracker.go` by
+substituting `"(no window title)"` when the observed title is empty,
+documented inline and added to `DESIGN.md`'s known limitations as item 9,
+explicitly framed as "found live, not anticipated in the original design."
+
+Added `segment_test.go` (Go's stdlib `testing`, no new dependency) for the
+`SegmentBuilder` timing logic specifically because `Observe` takes an
+explicit `time.Time` and is naturally testable without waiting on a real
+clock — used this to verify the `SegmentMaxDurationSeconds` force-flush
+boundary exactly (closes at precisely 300s, reopens with no time gap)
+without needing to wait 5 real minutes, plus app-switch/idle-transition
+closing, title-only-changes-not-closing, and `SegmentQueue.RemoveSent`
+correctly leaving segments enqueued *during* a simulated in-flight send
+alone. All 7 pass.
+
+Verified for real, in layers:
+1. `go build`, `go vet ./...` — clean.
+2. `go test ./...` — 7/7 unit tests pass.
+3. Started the real backend (confirmed Postgres already up via
+   `docker compose ps`, killed any stale `node` process first — same
+   lesson as every previous backend verification round) and ran the agent
+   against it for 35 real seconds: confirmed first-run registration,
+   `device.json` written, and the first heartbeat tick firing at exactly
+   30s with `accepted=0 duplicates=0` (no segments had closed yet, since
+   nothing transitioned in that window — correct, not a bug).
+4. Forced a real foreground-app switch by launching and closing Notepad
+   via `powershell.exe -Command "Start-Process notepad"` (no GUI
+   automation tool available, so this was the practical way to generate
+   genuine OS-level focus-change events rather than fabricate them) — this
+   is what surfaced the empty-title bug above.
+5. After the fix, reran the same live scenario end-to-end: `accepted=2
+   duplicates=0`, no errors.
+6. Queried Postgres **directly** (not just trusting the HTTP response) and
+   confirmed the device row (`agent_status=running`, `last_seen_at`
+   matching the heartbeat time) and both segments, including the
+   `"(no window title)"` placeholder, landed exactly as expected.
+7. Cleaned up all test artifacts afterward: deleted the test device and
+   its segments from Postgres, deleted the local `device.json` and log
+   files, stopped the backend `node` process — same hygiene discipline
+   maintained throughout this project, so the next real run is a genuine
+   first run, not one polluted by my own testing.
+
+Updated `.gitignore` (`agent/device.json`), `agent/README.md` (build
+instructions now note the backend must be running; new "Verifying
+registration, segments, and posting" section with exact expected log
+output at each step, including a stop-the-backend/restart-it check for
+the retry behavior; project layout and "what's not here yet" rewritten
+for accuracy), `DESIGN.md` (component status now "fully wired to the
+backend"; known-limitation #4 updated from a prediction to confirmed,
+verified behavior, plus a new non-durability sub-point; new item 9 for
+the window-title placeholder), and root `README.md` (agent marked
+complete, known-limitations summary updated to match).
+
+---
+
+**Outcome at end of session:** The agent is now fully wired to the
+backend — registers itself, tracks activity, builds segments, batches
+them, and posts to `POST /events` on the heartbeat cadence, all verified
+live against a real backend and Postgres, not just compiled. Caught and
+fixed one real bug (empty window titles) that only a live OS-level test
+surfaced. `DESIGN.md` and both READMEs are in sync with the current state.
+Remaining on the project overall: the React dashboard.
