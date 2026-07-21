@@ -984,3 +984,52 @@ built, tested (45/45 passing across five suites), and both `DESIGN.md` and
 `README.md` are updated to reflect it. Remaining from the locked contract:
 `GET /api/v1/stats/activity-over-time`, then the Go agent and React
 dashboard.
+
+### Prompt 18 (user, verbatim)
+
+> Confirm findDeviceOrRespond404 uses isUuid as a real type guard narrowing unknown to string, not a type cast - and show me what happens at runtime if req.params.id somehow comes through as an array instead of a string.
+
+### Response 22 (assistant, verbatim)
+
+> Confirmed, and demonstrated for real above — no cast anywhere in the path. Here's the trace:
+>
+> **Type guard, not a cast**
+>
+> `isUuid(value: unknown): value is string` in validation.ts:7-9 is a genuine TypeScript type predicate. The body actually inspects the runtime type (`typeof value === 'string'`) before doing anything else — it isn't asserting a type onto an untouched value the way `id as string` would.
+>
+> In `findDeviceOrRespond404` (devices.ts:27), `id: unknown` enters untyped. After `if (!isUuid(id)) { ...; return null; }`, the negative branch's fallthrough is where TypeScript applies the predicate: everywhere past that guard, `id` is narrowed to `string` — which is *why* `prisma.device.findUnique({ where: { id } })` on the next line compiles at all against Prisma's `string`-typed `where.id`, with no `as string` anywhere. If `isUuid` were a rubber-stamp cast instead of a real check, that guarantee wouldn't hold.
+>
+> **Runtime trace if `id` were an array**
+>
+> 1. `isUuid(['x', 'y'])` runs `typeof value === 'string'` → `typeof [] === 'object'` → `false`. The `&&` short-circuits, so `UUID_RE.test(value)` is **never called** — confirmed above (`isUuid(array): false`, no throw).
+> 2. Back in `findDeviceOrRespond404`: `!isUuid(id)` → `true` → `res.status(404).json({ error: 'Device not found' })`, returns `null`.
+> 3. The route handler's `if (!device) { return; }` fires — request cycle ends cleanly. No Prisma call ever executes with the malformed value, no exception reaches `errorHandler`.
+>
+> **One honest caveat**: for this specific route pattern (`/:id` and `/:id/timeline`, single named segments), Express/path-to-regexp will actually always give you a `string` for `id` — arrays only show up for repeated-param or splat patterns, which this route doesn't use. So `string | string[]` is Express 5's *general* `ParamsDictionary` typing, not a scenario this particular route can currently hit at runtime. The `unknown` parameter still earns its keep though: it's what makes the code correct-by-construction rather than correct-by-luck if the route ever changes shape.
+
+Verified rather than asserted: ran a real script (`tsx/cjs`-loaded, importing
+the actual `isUuid` from `src/validation.ts`, not a reproduction of it) —
+`isUuid(['not','a','uuid'])` → `false`, `isUuid('40f25610-...')` → `true`,
+`isUuid('not-a-uuid')` → `false`, `isUuid(undefined)` → `false`, all
+non-throwing. No code changed.
+
+### Prompt 19 (user, verbatim)
+
+> Update AI_USAGE as well when I do confirmation. record ALL.
+
+### Response 23 (assistant)
+
+Backfilled Prompt 18/Response 22 above — that Q&A-only exchange (verifying
+existing code, no files touched) had been skipped from the log. Standing
+instruction going forward, per this correction: log *every* exchange in
+this session, including pure confirmation/verification turns with no code
+changes, not just ones that produce or modify files — matches CLAUDE.md's
+"log every session" rule, but this makes explicit that "session" means
+every prompt/response pair, not just the substantive ones.
+
+---
+
+**Outcome at end of session:** Log now includes the `isUuid`
+type-guard-vs-cast confirmation exchange that had been dropped, plus this
+correction itself. No code or design docs changed this turn — logging
+only.
