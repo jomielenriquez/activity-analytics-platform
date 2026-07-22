@@ -1773,3 +1773,170 @@ rather than restarting from scratch. All three docs (`DESIGN.md`, root
 `README.md`, `dashboard/README.md`) reflect current state. Remaining:
 routing and the other three dashboard views (timeline, stats, recent
 activity).
+
+### Prompt 33 (user, verbatim)
+
+> Add client-side routing and build out the three remaining dashboard views: Timeline, Stats, and Recent Activity. Use react-router-dom for routing.
+>
+> Make the nav items (Timeline, Stats, Recent Activity) actual links to their routes, and make each device row in the Devices table clickable, routing to a per-device timeline view.
+>
+> Timeline view (/devices/:id/timeline):
+>
+> Fetch GET /api/v1/devices/:id/timeline, optionally with from/to date range inputs (simple date pickers or text inputs is fine).
+> Render segments chronologically (matches the backend's ascending order) as a simple list or basic visual timeline - does not need to be fancy, just clear: type, app name, window title (truncate long ones), start time, duration.
+> Handle the empty-segments case (device with no activity yet) and the 404 case (bad device id in the URL) explicitly.
+>
+> Stats view (/stats):
+>
+> Fetch GET /api/v1/stats/summary for the headline numbers (active device count, total active/idle time) and GET /api/v1/stats/top-apps for a ranked list.
+> Add a simple activity-over-time chart using GET /api/v1/stats/activity-over-time with an hour/day toggle - a basic bar or line chart is enough, a charting library is fine if you want one (recharts is reasonable) or plain divs/SVG if you want to avoid the dependency, your call, explain which and why.
+> Remember the known limitation already documented: gaps in the data are not zero-filled, so the chart will have visual gaps rather than a continuous zero line - handle that gracefully rather than crashing on missing buckets.
+>
+> Recent Activity view (/activity/recent):
+>
+> Fetch GET /api/v1/activity/recent, render as a simple reverse-chronological list/table: device name, type, app name, window title, start time, duration.
+> A refresh button or the same polling pattern used on the Devices view, your call - explain which and why.
+>
+> Keep styling consistent with the existing Devices view. Handle loading/error states the same way as before, don't skip that pattern just because these are simpler views.
+
+### Response 33 (assistant)
+
+Verified the exact response shape of all four endpoints directly from the
+route source (`activity.ts`, `stats.ts`, `devices.ts`) before writing any
+client code, rather than trusting memory from earlier in this
+conversation.
+
+**Structural decisions made before writing views**, each because a second
+(or third/fourth) use case had appeared, matching this project's
+established reuse-after-repetition pattern:
+- Extracted `useApiData` — the loading/hard-error/soft-error/(optional
+  poll) pattern from the Devices view — into a shared hook, since all four
+  views now need it. Deps-array changes reset to loading (a real new
+  query, e.g. a date filter or bucket toggle); a poll tick does not (a
+  silent background refresh) — one hook covers both without needing two
+  variants, since no view needs both simultaneously.
+- Reorganized routed views into `src/pages/`, moving the existing
+  `DeviceList.tsx` there as `DevicesPage.tsx` and refactoring it onto the
+  new shared hook (eliminating what was about to become duplicate logic),
+  keeping `components/` for things actually shared across views
+  (`StatusBadge`, the new `ActivityChart`, `Layout`).
+- Gave `ApiError` (already added to `api.ts` earlier) a `status` field
+  specifically so the Timeline view could branch on `error.status === 404`
+  — caught myself mid-implementation building a fragile string-prefix
+  check (`error.startsWith('404')`) instead, backed that out, and changed
+  `useApiData` to keep the raw thrown error rather than collapsing it to a
+  string too early, so callers can inspect its type. Documented as a
+  correction in the hook's own comment, not silently fixed.
+
+**Nav decision flagged rather than silently done differently from what
+was asked**: no standalone "Timeline" nav link, even though the prompt
+listed it alongside Stats/Recent Activity — the route is inherently
+per-device (`/devices/:id/timeline`), so a generic nav link would have no
+sensible destination. Nav has Devices/Stats/Recent Activity only, reachable
+per-device by clicking a row.
+
+**Stats chart**: loaded the dataviz skill's `marks-and-anatomy.md` and
+`interaction.md` reference files (beyond the top-level skill file already
+in context from the earlier StatusBadge work) before writing any chart
+code, since this is now an actual chart, not a badge. Chose hand-rolled
+SVG over `recharts` — consistent with this project's repeated preference
+for avoiding a dependency for a tractable problem, and the skill's mark
+specs (≤24px bar thickness, 4px rounded data-end/square baseline, 2px
+stacking gap, hairline gridlines) were concrete enough to implement
+correctly by hand, including a small `roundedTopRectPath` SVG path helper
+since plain `<rect rx>` rounds all four corners, not just the outward-facing
+one the spec calls for. **Bars, not a line, for a load-bearing reason, not
+aesthetics**: since the backend never zero-fills missing buckets, a line's
+connecting stroke would visually claim continuity across a gap that isn't
+real — a bar chart just omits the bar. Stacked (not grouped) the two
+series, since active+idle in a bucket are parts of one whole, not
+independent measures. Used the categorical palette (blue/orange) for the
+two series, deliberately not the status palette used for device status
+badges elsewhere — same words ("active"/"idle"), different job (identity
+of a compared series vs. one entity's current state) — added a new
+`--chart-series-1/2` CSS custom property pair rather than reusing
+`--status-good`/`--status-warning`. Simplified relative to the skill's
+full interaction spec given the brief's "basic is enough": native SVG
+`<title>` tooltips instead of a custom crosshair+tooltip layer, since
+every value is still reachable via axis labels and the stat tiles/top-apps
+table elsewhere on the page.
+
+**Recent Activity**: chose a manual refresh button over the Devices view's
+15s poll, and explained why rather than defaulting to consistency for its
+own sake — Devices directly answers "who's online right now" (staleness
+matters, worth polling continuously); Recent Activity is a historical feed
+of up to 200 rows where silent re-sorting mid-read is more disruptive than
+useful, and a button means the request only fires when the view is
+actually open.
+
+**Caught a real TypeScript gap immediately via the build, not lint**:
+after making `useApiData`'s `error` an `unknown` instead of a formatted
+string (for the `ApiError`/404 fix above), `tsc` failed on `{error && ...}`
+JSX in four files — `unknown && JSX` doesn't narrow to a JSX-safe type the
+way `string | null` did. Fixed with explicit `Boolean(error)` coercion at
+every call site rather than silencing the type error.
+
+Verified for real:
+- `npm run build` (`tsc -b && vite build`) — clean after the above fixes.
+- `npm run lint` (`oxlint`) — one `react-hooks/exhaustive-deps` warning on
+  `useApiData`'s intentionally-dynamic `deps` parameter (expected for a
+  generic hook — a literal array requirement doesn't apply when the array
+  comes from the caller); suppressed with `eslint-disable-next-line`
+  comments (oxlint honors these), not by restructuring the hook to hide a
+  legitimate pattern from the linter.
+- Started Postgres, the backend, and the dashboard dev server for real,
+  seeded two devices with ~6 hours of realistic mixed-app activity
+  (chrome.exe/Code.exe/slack.exe/notepad.exe, with idle gaps) via a script
+  posting through the actual `/events` endpoint rather than writing to the
+  DB directly, so the seed data exercises the same ingestion path real
+  usage would.
+- Drove all four routes with Playwright end-to-end: loaded Devices,
+  **clicked a real device row** and confirmed navigation to its timeline
+  with segments in ascending chronological order, navigated directly to a
+  made-up device UUID and confirmed the "device not found" message (not a
+  generic error), loaded Stats and confirmed tile values/chart bar
+  count/top-apps rows, **clicked the Hour→Day toggle** and confirmed the
+  chart re-rendered, loaded Recent Activity and confirmed 45 rows across
+  both seeded devices, **clicked the Refresh button**. Looked at every
+  screenshot, not just extracted text/counts — confirmed stacked bar
+  colors, rounded tops, legend, breadcrumb, and the idle-row `—` styling
+  all rendered as intended.
+- The two console "errors" from the run were both `Failed to load
+  resource: 404` from the *deliberate* bad-UUID test (doubled by React
+  StrictMode's dev-mode double-invoke) — confirmed this was the browser's
+  own network-panel logging of an intentionally-triggered 404, not an
+  unhandled exception, since the UI correctly showed the "device not
+  found" message throughout.
+- Noticed, while reviewing the day-bucket screenshot, that the chart's
+  day-bucket label didn't match the wall-clock day I expected — root
+  caused it to backend UTC-truncation vs. browser-local display, not a
+  bug, and added it to `DESIGN.md` as known limitation #11 rather than
+  letting it go unrecorded just because it wasn't a crash.
+- Cleaned up all seeded devices/segments from Postgres afterward (0
+  remaining, confirmed by query), reran the full 54-test backend suite to
+  confirm nothing broke, and reran `npm run build`/`npm run lint` clean
+  one final time after all doc edits.
+
+Updated `DESIGN.md` (dashboard row now "all 4 views built"; four new "Key
+decisions" entries — hand-rolled chart + bars-not-line, categorical-vs-status
+color reuse, Recent Activity's refresh-vs-poll choice; two new known
+limitations — the UTC/local day-bucket mismatch found live, and the
+absence of an automated dashboard test suite), `dashboard/README.md`
+(full rewrite: route table, the nav-Timeline-link decision explained, the
+chart section, the Recent Activity refresh-vs-poll section, expanded
+verification steps), and root `README.md` (now declares all three
+components — agent, backend, dashboard — complete per the assignment's
+required scope, with an updated known-limitations summary listing 12
+items).
+
+---
+
+**Outcome at end of session:** The dashboard now has all four required
+views with client-side routing, verified end-to-end in a real browser
+(not just build success) — including actually clicking through from a
+device row into its timeline and toggling the chart's bucket size, not
+just loading each route in isolation. **This completes the assignment's
+required scope for all three components** (agent, backend, dashboard).
+`DESIGN.md` and both project READMEs reflect this. Twelve known
+limitations are documented across the project, each a deliberate,
+explained decision rather than an oversight.

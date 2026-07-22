@@ -14,6 +14,8 @@ if (!BACKEND_URL || !ADMIN_API_KEY) {
 }
 
 export type DeviceStatus = 'active' | 'idle' | 'paused' | 'offline';
+export type SegmentType = 'active' | 'idle';
+export type Bucket = 'hour' | 'day';
 
 export interface Device {
   id: string;
@@ -22,6 +24,67 @@ export interface Device {
   user_identifier: string;
   last_seen_at: string | null;
   status: DeviceStatus;
+}
+
+export interface TimelineSegment {
+  client_segment_id: string;
+  type: SegmentType;
+  app_name: string | null;
+  window_title: string | null;
+  started_at: string;
+  ended_at: string;
+  duration_seconds: number;
+}
+
+export interface StatsSummary {
+  active_device_count: number;
+  total_active_seconds: number;
+  total_idle_seconds: number;
+}
+
+export interface TopApp {
+  app_name: string;
+  total_seconds: number;
+}
+
+export interface ActivityBucket {
+  bucket_start: string;
+  active_seconds: number;
+  idle_seconds: number;
+}
+
+export interface RecentActivityItem {
+  device_name: string;
+  type: SegmentType;
+  app_name: string | null;
+  window_title: string | null;
+  started_at: string;
+  ended_at: string;
+  duration_seconds: number;
+}
+
+// Carries the HTTP status so callers can branch on specific codes (e.g.
+// the Timeline view treating 404 as "bad device id" rather than a generic
+// failure) instead of parsing the message string.
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+function buildQuery(params: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== '') {
+      search.set(key, String(value));
+    }
+  }
+  const qs = search.toString();
+  return qs ? `?${qs}` : '';
 }
 
 async function apiFetch<T>(path: string): Promise<T> {
@@ -36,7 +99,10 @@ async function apiFetch<T>(path: string): Promise<T> {
 
   if (!response.ok) {
     const body = await response.text().catch(() => '');
-    throw new Error(`${response.status} ${response.statusText}${body ? `: ${body}` : ''}`);
+    throw new ApiError(
+      response.status,
+      `${response.status} ${response.statusText}${body ? `: ${body}` : ''}`,
+    );
   }
 
   return response.json() as Promise<T>;
@@ -44,4 +110,31 @@ async function apiFetch<T>(path: string): Promise<T> {
 
 export function getDevices(): Promise<Device[]> {
   return apiFetch<Device[]>('/api/v1/devices');
+}
+
+export function getDeviceTimeline(deviceId: string, from?: string, to?: string): Promise<TimelineSegment[]> {
+  return apiFetch<TimelineSegment[]>(`/api/v1/devices/${deviceId}/timeline${buildQuery({ from, to })}`);
+}
+
+export function getStatsSummary(from?: string, to?: string): Promise<StatsSummary> {
+  return apiFetch<StatsSummary>(`/api/v1/stats/summary${buildQuery({ from, to })}`);
+}
+
+export function getTopApps(from?: string, to?: string, deviceId?: string): Promise<TopApp[]> {
+  return apiFetch<TopApp[]>(`/api/v1/stats/top-apps${buildQuery({ from, to, device_id: deviceId })}`);
+}
+
+export function getActivityOverTime(
+  bucket: Bucket,
+  from?: string,
+  to?: string,
+  deviceId?: string,
+): Promise<ActivityBucket[]> {
+  return apiFetch<ActivityBucket[]>(
+    `/api/v1/stats/activity-over-time${buildQuery({ bucket, from, to, device_id: deviceId })}`,
+  );
+}
+
+export function getRecentActivity(limit?: number): Promise<RecentActivityItem[]> {
+  return apiFetch<RecentActivityItem[]>(`/api/v1/activity/recent${buildQuery({ limit })}`);
 }

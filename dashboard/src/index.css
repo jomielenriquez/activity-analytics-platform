@@ -14,6 +14,14 @@
   --status-critical: #d03b3b;
   --status-neutral: #898781;
 
+  /* Categorical slots 1/2 — used for the activity-over-time chart's two
+     series (active/idle). Deliberately distinct from --status-* above:
+     that palette means "this one entity's current state," this one means
+     "identity of a series being compared" — same words, different job,
+     per the dataviz skill's categorical-vs-status distinction. */
+  --chart-series-1: #2a78d6;
+  --chart-series-2: #eb6834;
+
   --error-bg: #fbeceb;
   --error-text: #8a2222;
 }
@@ -31,6 +39,8 @@
     --accent: #3987e5;
 
     --status-warning: #c98500;
+    --chart-series-1: #3987e5;
+    --chart-series-2: #d95926;
     --error-bg: #3a1f1f;
     --error-text: #f5a3a3;
   }

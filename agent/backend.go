@@ -64,8 +64,10 @@ type eventPayload struct {
 }
 
 type eventsRequest struct {
-	AgentStatus string         `json:"agent_status"`
-	Events      []eventPayload `json:"events"`
+	AgentStatus          string         `json:"agent_status"`
+	CurrentState         string         `json:"current_state"`
+	StateDurationSeconds int            `json:"state_duration_seconds"`
+	Events               []eventPayload `json:"events"`
 }
 
 type eventsResponse struct {
@@ -76,8 +78,12 @@ type eventsResponse struct {
 // postEvents calls POST /api/v1/events with whatever's currently queued
 // (an empty slice is valid — it's still a heartbeat). app_name/
 // window_title are left as nil (omitted from the JSON) for idle segments,
-// since the backend rejects "" as neither absent nor null.
-func postEvents(creds *DeviceCredentials, agentStatus string, segments []Segment) (accepted, duplicates int, err error) {
+// since the backend rejects "" as neither absent nor null. current_state
+// and stateDurationSeconds are the agent's live active/idle state and how
+// long it's held that state, as of this tick (see LiveState in state.go)
+// — separate from `segments`, which only carries state that has already
+// *closed* into a segment.
+func postEvents(creds *DeviceCredentials, agentStatus, currentState string, stateDurationSeconds int, segments []Segment) (accepted, duplicates int, err error) {
 	events := make([]eventPayload, len(segments))
 	for i, seg := range segments {
 		ev := eventPayload{
@@ -94,7 +100,12 @@ func postEvents(creds *DeviceCredentials, agentStatus string, segments []Segment
 		events[i] = ev
 	}
 
-	reqBody, err := json.Marshal(eventsRequest{AgentStatus: agentStatus, Events: events})
+	reqBody, err := json.Marshal(eventsRequest{
+		AgentStatus:          agentStatus,
+		CurrentState:         currentState,
+		StateDurationSeconds: stateDurationSeconds,
+		Events:               events,
+	})
 	if err != nil {
 		return 0, 0, fmt.Errorf("encode events request: %w", err)
 	}

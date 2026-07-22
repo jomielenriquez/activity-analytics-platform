@@ -1,13 +1,10 @@
 import type { ReactNode } from 'react';
+import { NavLink } from 'react-router-dom';
 
-// No router yet — deliberately. This nav is a static placeholder marking
-// where the other views slot in once they exist (each becomes a real
-// route + link when built); for now only "Devices" does anything.
 const NAV_ITEMS = [
-  { label: 'Devices', active: true },
-  { label: 'Timeline', active: false },
-  { label: 'Stats', active: false },
-  { label: 'Recent Activity', active: false },
+  { label: 'Devices', to: '/' },
+  { label: 'Stats', to: '/stats' },
+  { label: 'Recent Activity', to: '/activity/recent' },
 ];
 
 export function Layout({ children }: { children: ReactNode }) {
@@ -17,13 +14,14 @@ export function Layout({ children }: { children: ReactNode }) {
         <h1 className="layout-title">Activity Analytics</h1>
         <nav className="layout-nav">
           {NAV_ITEMS.map((item) => (
-            <span
-              key={item.label}
-              className={item.active ? 'nav-item nav-item--active' : 'nav-item nav-item--placeholder'}
-              title={item.active ? undefined : 'Not built yet'}
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === '/'}
+              className={({ isActive }) => (isActive ? 'nav-item nav-item--active' : 'nav-item')}
             >
               {item.label}
-            </span>
+            </NavLink>
           ))}
         </nav>
       </header>

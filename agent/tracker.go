@@ -16,7 +16,12 @@ import (
 // does, not just what it prints. Note this is a different loop from
 // sender.go's heartbeat loop, which keeps running while paused (see that
 // file's comment for why).
-func RunTracker(state *AgentState, builder *SegmentBuilder, queue *SegmentQueue) {
+//
+// live is updated on every poll tick (not just on transitions the
+// SegmentBuilder cares about) so sender.go always has an up-to-the-tick
+// answer for "what's the device doing right now" to put in current_state,
+// regardless of whether that state's segment has closed yet.
+func RunTracker(state *AgentState, builder *SegmentBuilder, queue *SegmentQueue, live *LiveState) {
 	ticker := time.NewTicker(PollIntervalSeconds * time.Second)
 	defer ticker.Stop()
 
@@ -37,11 +42,11 @@ func RunTracker(state *AgentState, builder *SegmentBuilder, queue *SegmentQueue)
 			paused = false
 		}
 
-		poll(builder, queue)
+		poll(builder, queue, live)
 	}
 }
 
-func poll(builder *SegmentBuilder, queue *SegmentQueue) {
+func poll(builder *SegmentBuilder, queue *SegmentQueue, live *LiveState) {
 	idle, err := idleSeconds()
 	if err != nil {
 		log.Printf("[tracker] idle check failed: %v", err)
@@ -49,6 +54,7 @@ func poll(builder *SegmentBuilder, queue *SegmentQueue) {
 	}
 
 	sample := PollSample{Active: idle < IdleThresholdSeconds}
+	live.Set(sample.Active)
 
 	if sample.Active {
 		title, exeName, ok := foregroundWindowInfo()

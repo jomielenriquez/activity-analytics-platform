@@ -78,11 +78,19 @@ segment model.
 **Every `HeartbeatIntervalSeconds` (30s)**, regardless of whether anything
 closed, you should see:
 ```
-[sender] sending 2 segment(s), agent_status=running
+[sender] sending 2 segment(s), agent_status=running, current_state=active, state_duration_seconds=87
 [sender] batch sent: accepted=2 duplicates=0
 ```
 (`sending 0 segment(s)` is normal and expected on most ticks — it's still
-a real POST, since it's also the liveness ping.) Check the dashboard
+a real POST, since it's also the liveness ping. `current_state` reflects
+what the tracker's most recent poll observed, updated every poll tick —
+not just when a segment closes, which is what lets the dashboard's status
+column follow an active/idle transition within one heartbeat instead of
+waiting for that segment to close. `state_duration_seconds` is how long
+it's been continuously in `current_state`, in `PollIntervalSeconds`
+increments — it resets to 0 on the very next tick after a transition, so
+watch for it dropping back to a small number when you switch active/idle,
+not carrying over the previous state's count.) Check the dashboard
 `GET /api/v1/devices/:id/timeline` endpoint, or query Postgres directly,
 to confirm segments actually landed — the accepted/duplicates counts alone
 only prove the backend *responded*, not that the data is correct.

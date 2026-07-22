@@ -19,7 +19,7 @@ import (
 // reachable yet); this loop retries registration each tick until it
 // succeeds, rather than requiring the agent to be restarted once the
 // backend comes back.
-func RunEventSender(state *AgentState, queue *SegmentQueue, creds *DeviceCredentials) {
+func RunEventSender(state *AgentState, queue *SegmentQueue, creds *DeviceCredentials, live *LiveState) {
 	ticker := time.NewTicker(HeartbeatIntervalSeconds * time.Second)
 	defer ticker.Stop()
 
@@ -39,9 +39,12 @@ func RunEventSender(state *AgentState, queue *SegmentQueue, creds *DeviceCredent
 		}
 
 		segments := queue.Snapshot()
-		log.Printf("[sender] sending %d segment(s), agent_status=%s", len(segments), agentStatus)
+		currentState := live.CurrentState()
+		stateDuration := live.StateDurationSeconds()
+		log.Printf("[sender] sending %d segment(s), agent_status=%s, current_state=%s, state_duration_seconds=%d",
+			len(segments), agentStatus, currentState, stateDuration)
 
-		accepted, duplicates, err := postEvents(creds, agentStatus, segments)
+		accepted, duplicates, err := postEvents(creds, agentStatus, currentState, stateDuration, segments)
 		if err != nil {
 			log.Printf("[sender] send failed, %d segment(s) remain queued for next tick: %v", len(segments), err)
 			continue

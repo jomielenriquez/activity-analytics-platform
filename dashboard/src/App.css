@@ -36,11 +36,6 @@
   font-weight: 600;
 }
 
-.nav-item--placeholder {
-  color: var(--text-muted);
-  cursor: default;
-}
-
 .layout-main {
   flex: 1;
   padding: 24px;
@@ -123,4 +118,247 @@
 
 .status-dot--neutral {
   background: var(--status-neutral);
+}
+
+.row-link {
+  color: var(--text-primary);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.row-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.page-breadcrumb {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 16px;
+}
+
+.page-breadcrumb a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.page-breadcrumb a:hover {
+  text-decoration: underline;
+}
+
+.page-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.filter-row {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.filter-row input {
+  margin-left: 6px;
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+button {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.timeline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 14px;
+}
+
+.timeline-item {
+  display: grid;
+  grid-template-columns: 64px 140px 1fr 180px 64px;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--gridline);
+  border-left: 3px solid transparent;
+}
+
+.timeline-item:last-child {
+  border-bottom: none;
+}
+
+.timeline-item--active {
+  border-left-color: var(--status-good);
+}
+
+.timeline-item--idle {
+  border-left-color: var(--status-neutral);
+}
+
+.timeline-item-type {
+  text-transform: capitalize;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.timeline-item-app {
+  font-weight: 500;
+}
+
+.timeline-item-title {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-item-time,
+.timeline-item-duration {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stats-page section {
+  margin-bottom: 32px;
+}
+
+.stat-tiles {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px 20px;
+  min-width: 160px;
+}
+
+.stat-tile-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stat-tile-value {
+  font-size: 28px;
+  font-weight: 600;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.section-header h2 {
+  font-size: 16px;
+}
+
+.bucket-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.toggle-btn {
+  padding: 4px 12px;
+  font-size: 13px;
+}
+
+.toggle-btn--active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.chart-legend {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chart-legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.chart-legend-swatch--active {
+  background: var(--chart-series-1);
+}
+
+.chart-legend-swatch--idle {
+  background: var(--chart-series-2);
+}
+
+.activity-chart {
+  width: 100%;
+  height: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.chart-gridline {
+  stroke: var(--gridline);
+  stroke-width: 1;
+}
+
+.chart-axis-label {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+
+.chart-bar--active {
+  fill: var(--chart-series-1);
+}
+
+.chart-bar--idle {
+  fill: var(--chart-series-2);
 }
