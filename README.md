@@ -29,6 +29,54 @@ Full data model, API contract, and the reasoning behind each design
 decision live in **[DESIGN.md](DESIGN.md)** — that's the canonical
 reference; this file won't duplicate it.
 
+## Note on build order
+
+The assignment specifies building in this order: desktop agent → backend
+API → dashboard, with the agent called out as the most important
+component. My actual order was different: I locked down the full data
+model and API contract first (the agent and dashboard both depend on that
+contract, so I wanted it stable before building against it), then fully
+built and tested the backend, then the agent, then the dashboard.
+
+In retrospect, given the assignment's explicit emphasis on the agent, I
+should have scaffolded at least a minimal agent shell alongside the initial
+contract design, rather than completing the backend first. The agent
+itself wasn't shortchanged on attention or quality once I got to it — it
+has real Win32 foreground/idle detection, segment construction with
+idempotent batching, and full end-to-end verification against a live
+backend (see [agent/README.md](agent/README.md) and AI_USAGE.md) — but the
+sequencing itself didn't match what was asked, and I'd fix that if I did
+this again.
+
+## What I'd improve with more time
+
+- **Build order** (see above) — start with the agent, even a minimal
+  version, before the backend contract is fully implemented.
+- **Test isolation**: the backend test suite currently serializes file
+  execution (`fileParallelism: false`) because all tests share one mutable
+  Postgres database. The correct fix is per-test transactional rollback,
+  which would need the app's Prisma client threaded through an ambient
+  test transaction rather than used as a module-level singleton — a real
+  refactor, out of scope given the time available. Full tradeoff analysis
+  in [DESIGN.md](DESIGN.md#known-limitations).
+- **Window title redaction**: currently a truncate-only stub
+  (`redactWindowTitle()`). Real redaction (blanking titles for known
+  password managers, stripping query strings from browser tabs) has a
+  documented seam to plug into but isn't implemented.
+- **Agent retry queue durability**: unsent segments queue in memory with
+  no size/age cap and no disk persistence — an extended backend outage
+  would lose data silently past whatever memory allows.
+- **Proportional segment splitting** in `activity-over-time`: a segment
+  spanning a bucket boundary is currently attributed entirely to its start
+  bucket rather than split proportionally across both.
+- **Chrome extension**: not built. It's explicitly optional in the
+  assignment, and I prioritized depth on the three required components
+  (agent, backend, dashboard) over adding a fourth optional one given the
+  time available.
+
+Full list of known limitations, each a deliberate and documented tradeoff
+rather than an oversight, is in [DESIGN.md](DESIGN.md#known-limitations).
+
 ## Setup
 
 Requires Docker and Node.js 20+.
