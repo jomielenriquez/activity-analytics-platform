@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/user"
-	"path/filepath"
 )
 
 // DeviceCredentials is what gets persisted to DeviceConfigFileName and
@@ -18,11 +17,7 @@ type DeviceCredentials struct {
 }
 
 func deviceConfigPath() (string, error) {
-	exePath, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolve executable path: %w", err)
-	}
-	return filepath.Join(filepath.Dir(exePath), DeviceConfigFileName), nil
+	return exeRelativePath(DeviceConfigFileName)
 }
 
 // loadOrRegisterDevice loads persisted credentials if they exist and look

@@ -12,6 +12,14 @@ const BackendURL = "http://localhost:3000"
 // shortcut, or Windows startup). Gitignored; see device.go.
 const DeviceConfigFileName = "device.json"
 
+// LogFileName is where log output goes, resolved the same way as
+// DeviceConfigFileName (next to the executable). Since this build is
+// compiled with -H=windowsgui (no console subsystem — see agent/README.md),
+// there's no attached console for the standard `log` package's default
+// output to reach; this file is the only way to see what the agent is
+// doing. Gitignored via the root .gitignore's `*.log` rule.
+const LogFileName = "agent.log"
+
 // Timing constants from DESIGN.md's "Timing constants" section — kept in
 // sync with the backend's contract.
 const (
