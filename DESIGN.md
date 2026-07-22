@@ -57,15 +57,17 @@ per second.
 
 ```prisma
 model Device {
-  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  deviceName     String    @map("device_name")
-  os             String
-  userIdentifier String    @map("user_identifier")
-  apiKeyHash     String    @map("api_key_hash")
-  agentStatus    String    @default("running") @map("agent_status") // 'running' | 'paused'
-  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  lastSeenAt     DateTime? @map("last_seen_at") @db.Timestamptz(6)
-  segments       ActivitySegment[]
+  id                   String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  deviceName           String       @map("device_name")
+  os                   String
+  userIdentifier       String       @map("user_identifier")
+  apiKeyHash           String       @map("api_key_hash")
+  agentStatus          String       @default("running") @map("agent_status") // 'running' | 'paused'
+  currentState         SegmentType? @map("current_state") // agent's live active/idle self-report, from the latest heartbeat — see status derivation below
+  stateDurationSeconds Int?         @map("state_duration_seconds") // how long the agent has been continuously in currentState, from the latest heartbeat
+  createdAt            DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastSeenAt           DateTime?    @map("last_seen_at") @db.Timestamptz(6)
+  segments             ActivitySegment[]
   @@map("devices")
 }
 
@@ -105,18 +107,45 @@ what this trades away.
 ## Device status derivation
 
 Implemented in `backend/src/lib/deviceStatus.ts` (`deriveDeviceStatus`),
-computed on read, not stored. Branch order matters — evaluated top to
-bottom, first match wins:
+computed on read from columns on the `Device` row itself — no join or
+aggregate query needed. Branch order matters — evaluated top to bottom,
+first match wins:
 
 1. `last_seen_at` is `null` or older than `OFFLINE_THRESHOLD_SECONDS` → **offline**
 2. else if `agent_status === 'paused'` → **paused**
-3. else if the device's latest segment has `type === 'idle'` → **idle**
+3. else if `current_state === 'idle'` → **idle**
 4. else → **active**
 
-`paused` is checked before the latest-segment-type check deliberately: an
+`paused` is checked before the `current_state` check deliberately: an
 agent explicitly paused by its user should read as "paused," not "active,"
-even if its last recorded segment was active — precedence, not just
-presence, is the point of this ordering.
+even if it last reported itself active — precedence, not just presence, is
+the point of this ordering.
+
+`current_state` is the agent's live self-reported active/idle state, sent
+on every heartbeat (see `POST /events` below) and stored directly on
+`devices.current_state` — **not** derived from `activity_segments`. This
+is deliberate: a segment only lands in `activity_segments` once it
+*closes* (on a transition or the `SEGMENT_MAX_DURATION_SECONDS`
+force-flush), so deriving status from "the latest closed segment" could
+lag a real transition by up to 300s — the newly-opened segment for the new
+state sits unflushed in the agent's memory that whole time. `current_state`
+carries the same information the agent already has at poll time, on every
+heartbeat, independent of segment lifecycle — closing that gap. (This
+was known limitation #13 below; now resolved.)
+
+`state_duration_seconds` rides alongside `current_state` on the same
+heartbeat: how long the agent has been continuously in `current_state`,
+tracked by the agent itself (`LiveState` in `agent/state.go`) in
+`POLL_INTERVAL_SECONDS`-sized increments, reset to 0 on every active/idle
+flip. It's stored on `devices.state_duration_seconds`, same
+write-unconditionally-every-heartbeat treatment as `current_state`, and is
+**not** used by `deriveDeviceStatus` — it's exposed purely for display
+(the Devices table's "Idle for 6m 40s"), not part of the status ladder.
+This closes a smaller, related gap: before this, the dashboard had no way
+to show *how long* a device had been idle short of reading `last_seen_at`
+(which, as the earlier idle-status debugging session established, reflects
+heartbeat liveness — not time-in-state — and updates on every heartbeat
+regardless of activity, so it was never a usable proxy for this).
 
 ## API contract
 
@@ -134,24 +163,30 @@ Response `201`: `{ device_id, api_key }` — the raw key is shown exactly once.
 **`POST /events`** — called every `HEARTBEAT_INTERVAL_SECONDS` tick; also
 serves as the heartbeat (no separate `/heartbeat` endpoint — see
 [decisions](#key-decisions)).
-Body: `{ agent_status: 'running'|'paused', events: [...] }` — `events` is
-`[]` on most ticks (nothing new to report).
+Body: `{ agent_status: 'running'|'paused', current_state: 'active'|'idle', state_duration_seconds, events: [...] }` — `events` is
+`[]` on most ticks (nothing new to report); `current_state` and
+`state_duration_seconds` are sent on **every** tick regardless, since
+together they're the agent's live answer to "what are you doing right now,
+and for how long," independent of whatever's queued in `events`.
 Each event: `{ client_segment_id, type: 'active'|'idle', app_name?, window_title?, started_at, ended_at, duration_seconds }`.
 `app_name`/`window_title` required when `type: 'active'`, must be
 absent/null when `type: 'idle'`. Malformed events reject the **entire
 batch** with `400` naming every failing `events[i].field` (all-or-nothing,
-not partial-insert). `window_title` passes through `redactWindowTitle()`
+not partial-insert); a missing or invalid `current_state` (must be exactly
+`'active'` or `'idle'`) or `state_duration_seconds` (must be a
+non-negative integer) rejects the request the same way.
+`window_title` passes through `redactWindowTitle()`
 (a truncate-to-512-chars stub today — see known limitations for the real
 seam this leaves open) before insert.
 Insert uses `createMany({ skipDuplicates: true })` against the
 `(device_id, client_segment_id)` unique constraint — idempotent on retry,
-first write wins on conflict. `devices.agent_status`/`last_seen_at` update
-unconditionally in the same transaction, even when `events` is empty.
+first write wins on conflict. `devices.agent_status`/`current_state`/`state_duration_seconds`/`last_seen_at`
+update unconditionally in the same transaction, even when `events` is empty.
 Response `202`: `{ accepted, duplicates }`.
 
 ### Dashboard (admin auth)
 
-**`GET /devices`** — all devices: `{ id, device_name, os, user_identifier, last_seen_at, status }`, ordered by `last_seen_at` desc, nulls last. `status` for every device computed from one `DISTINCT ON` query (latest segment type per device), not N+1.
+**`GET /devices`** — all devices: `{ id, device_name, os, user_identifier, last_seen_at, status, state_duration_seconds }`, ordered by `last_seen_at` desc, nulls last. `status` for every device is derived straight from that device's own row (`agent_status`, `current_state`, `last_seen_at`) — no join, no per-device or aggregate query needed. `state_duration_seconds` is passed through as-is from the same row (`null` for a device that hasn't sent a heartbeat yet) — it's not part of `status`'s derivation, purely a display value for "how long has this device been in its current state."
 
 **`GET /devices/:id`** — same shape plus `created_at`. `404` for a nonexistent or malformed id.
 
@@ -161,7 +196,7 @@ Response `202`: `{ accepted, duplicates }`.
 
 **`GET /stats/top-apps?from&to&device_id?`** — `[{ app_name, total_seconds }]`, top 20, descending. Excludes idle segments (`app_name` is always null there).
 
-**`GET /stats/activity-over-time?from&to&bucket=hour|day&device_id?`** — `[{ bucket_start, active_seconds, idle_seconds }]`, ordered chronologically ascending. `bucket` is **required**, must be exactly `hour` or `day` (`400` otherwise). `device_id`, if provided, must be a valid UUID (`400` if not) but never `404`s for a well-formed id that matches no device — this is an aggregation endpoint, not a resource lookup, so a non-matching filter is just an empty result, same as `top-apps`. Buckets computed via raw SQL `date_trunc('hour'|'day', started_at)` grouped with `type` (same raw-SQL precedent as the `DISTINCT ON` query behind device status) — Prisma's query builder has no bucketing/`date_trunc` primitive. **Only buckets with at least one segment appear** — empty buckets are never zero-filled (see known limitations for why, and what it means for the dashboard). A segment is attributed **entirely** to the bucket containing its `started_at`, with no proportional splitting across a bucket boundary (see known limitations).
+**`GET /stats/activity-over-time?from&to&bucket=hour|day&device_id?`** — `[{ bucket_start, active_seconds, idle_seconds }]`, ordered chronologically ascending. `bucket` is **required**, must be exactly `hour` or `day` (`400` otherwise). `device_id`, if provided, must be a valid UUID (`400` if not) but never `404`s for a well-formed id that matches no device — this is an aggregation endpoint, not a resource lookup, so a non-matching filter is just an empty result, same as `top-apps`. Buckets computed via raw SQL `date_trunc('hour'|'day', started_at)` grouped with `type` — Prisma's query builder has no bucketing/`date_trunc` primitive. **Only buckets with at least one segment appear** — empty buckets are never zero-filled (see known limitations for why, and what it means for the dashboard). A segment is attributed **entirely** to the bucket containing its `started_at`, with no proportional splitting across a bucket boundary (see known limitations).
 
 **`GET /activity/recent?limit`** — `[{ device_name, type, app_name, window_title, started_at, ended_at, duration_seconds }]`, ordered by `started_at` desc. No `device_id` filter — not in the locked contract for this endpoint (unlike `top-apps`), not added speculatively. `limit` defaults to 50, clamped (not rejected) at 200 if higher; rejected with `400` if not a positive integer.
 
@@ -170,7 +205,7 @@ Response `202`: `{ accepted, duplicates }`.
 - **Express 5, not Express 4 + a shim** — native forwarding of thrown/rejected errors from async handlers to error-handling middleware, matching "routes throw instead of nesting try/catch" without an `express-async-errors` patch dependency.
 - **One ingestion endpoint, not `/events` + `/heartbeat`** — both would share the same auth check and the same `last_seen_at`/`agent_status` update; the payload-size difference between an empty `events` array and 0–2 segments is negligible. A second endpoint would only duplicate the same code path.
 - **`client_segment_id` idempotency over at-least-once semantics** — the agent generates this UUID when a segment starts; the unique constraint plus `skipDuplicates` means retried batches after a dropped response are always safe to resend.
-- **N+1 avoidance via `DISTINCT ON`** — Prisma's query builder has no "latest related row per parent" primitive (no window-function support in the fluent API); a single raw `SELECT DISTINCT ON (device_id) ... ORDER BY device_id, started_at DESC` gets every device's latest segment type in one round trip, backed by the existing `(device_id, started_at)` index. Shared via `lib/deviceStatus.ts`'s `getLatestSegmentTypeByDevice()`.
+- **`current_state` stored directly on `devices`, not derived from `activity_segments`** — the original design derived live status from each device's latest segment via a raw `SELECT DISTINCT ON (device_id) ...` query (Prisma's fluent API has no "latest related row per parent"/window-function primitive). That worked but had a real lag: a segment only exists once it *closes*, so a fresh transition could take up to `SEGMENT_MAX_DURATION_SECONDS` to become visible (known limitation #13, now resolved). Moving the agent's live active/idle self-report onto the `Device` row itself, updated every heartbeat, fixes the lag and also removes the extra `DISTINCT ON` round trip — status now derives entirely from columns already being fetched on the device row.
 - **CORS is open (all origins), not locked to the dashboard's origin** — found live when the dashboard's first real browser request was silently blocked by the browser before it reached auth at all (curl and the test suite never exercise this, since neither is a browser enforcing CORS). Permissive origin is an acceptable choice specifically because auth here is a `Bearer` token in a header, not a cookie: CORS's actual security value is restricting *credentialed* (cookie-based) cross-origin requests, which doesn't apply to header-based auth — the real access boundary is still `requireAdminAuth`/`requireDeviceAuth`, unaffected by which origin the request came from.
 - **Dashboard: hand-rolled SVG chart, not a charting library** — the brief allowed either and asked for reasoning. This project has consistently avoided a dependency for problems tractable by hand; the dataviz skill's mark specs (bar caps, stacking gaps, gridlines, legend rules) were sufficient to build a correct chart without one, though it's meaningfully more code than this project's smaller hand-rolled bits (UUID generation, relative-time formatting) — a real tradeoff, not a free win. **Bars, not a line**, and that choice is load-bearing: the backend never zero-fills missing buckets (known limitation #8 below), and a line's connecting stroke would visually claim continuity across a gap that isn't there.
 - **Dashboard: the activity-over-time chart's two series (active/idle) use the categorical palette, not the status palette** — even though "active"/"idle" are the same words used for device status elsewhere. Different job: a device's status badge means "this one entity's current state" (the status ladder); the chart's two bars mean "identity of a series being compared" (categorical). Reusing status colors for both would conflate two different encodings that happen to share vocabulary.
@@ -192,6 +227,8 @@ Deliberately not fixed now — documented so they're a decision, not an oversigh
 10. **The dashboard ships the admin API key to the browser.** `VITE_ADMIN_API_KEY` is bundled into client-side JavaScript by design (Vite env vars are meant to be public) — anyone with dev tools open can read it out of the bundle or any request's headers. Acceptable for an internal/take-home admin tool with no other auth model built, but a real deployment would need session-based auth or a backend-for-frontend proxy that keeps the key server-side, never shipped to a public SPA bundle.
 11. **The Stats chart's day-bucket labels render in the browser's local timezone; the backend truncates buckets in UTC.** Noticed live while verifying (a bucket landed on "Jul 21" in the chart at a time that felt like it should read "Jul 22"). For hour buckets the practical effect is invisible (only the label's clock format shifts); for day buckets, a user far from UTC could see a day boundary that doesn't match their own midnight. Not fixed this pass — would mean either bucketing in the client's timezone server-side (a real backend change, not just a display fix) or clearly labeling the chart as UTC-bucketed.
 12. **No automated test suite for the dashboard.** Every view was verified live with Playwright driving a real browser during development (see `dashboard/README.md`), which is real verification, but none of it is a committed, repeatable test file the way the backend's Vitest suite or the agent's Go tests are — there's nothing that runs on `npm test` to catch a regression later.
+13. ~~**Idle status can lag reality by up to `SEGMENT_MAX_DURATION_SECONDS` (300s) after a real active→idle transition.**~~ **Resolved.** Confirmed live: `deriveDeviceStatus` used to read the device's most recently *closed* segment, but the agent's newly-opened idle segment doesn't close (and so never reaches Postgres) until either the user goes active again or that segment hits its own 300s force-flush — so a device idle for, say, 400 real seconds could still show `active`, correctly derived from stale data rather than incorrectly derived from current data. Not an agent bug (it detected the transition in real time) or a backend derivation bug (it was reading exactly what had been sent) — it was a gap in the closed-segment-only data model used for live status.
+    Fix: the agent now sends `current_state: 'active'|'idle'` on every heartbeat (see [API contract](#api-contract) and [device status derivation](#device-status-derivation)) — its live self-report of what it's doing *right now*, tracked independently of `SegmentBuilder`/`SegmentQueue` so it updates every poll tick, not just on segment close. `devices.current_state` is written unconditionally on every `POST /events`, same as `agent_status`/`last_seen_at`. `deriveDeviceStatus`'s idle/active branch now reads this column instead of the latest-closed-segment query, closing the gap to one heartbeat interval (`HEARTBEAT_INTERVAL_SECONDS`, 30s) instead of up to 300s. Verified live and covered by a regression test (`devices.test.ts`, "status reflects a live idle transition on the next heartbeat, without waiting for the idle segment to close") that asserts status flips to `idle` on the heartbeat carrying the transition while `activity_segments` still has zero `idle` rows for that device.
 
 Separately, unresolved and not a design decision: `npm audit` flags 5
 vulnerabilities (1 critical, 1 high, 3 moderate) in `vitest`'s transitive

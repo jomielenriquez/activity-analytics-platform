@@ -5,7 +5,7 @@ import { prisma } from '../db';
 import { requireAdminAuth } from '../middleware/auth';
 import { isUuid } from '../validation';
 import { buildStartedAtFilter, parseDateRangeQuery } from '../lib/dateRange';
-import { deriveDeviceStatus, getLatestSegmentTypeByDevice } from '../lib/deviceStatus';
+import { deriveDeviceStatus } from '../lib/deviceStatus';
 
 export const statsRouter = Router();
 
@@ -18,14 +18,13 @@ statsRouter.get('/summary', requireAdminAuth, async (req, res) => {
 
   const startedAt = buildStartedAtFilter(from, to);
 
-  const [durationsByType, devices, latestTypeByDevice] = await Promise.all([
+  const [durationsByType, devices] = await Promise.all([
     prisma.activitySegment.groupBy({
       by: ['type'],
       where: startedAt ? { startedAt } : undefined,
       _sum: { durationSeconds: true },
     }),
-    prisma.device.findMany({ select: { id: true, lastSeenAt: true, agentStatus: true } }),
-    getLatestSegmentTypeByDevice(),
+    prisma.device.findMany({ select: { id: true, lastSeenAt: true, agentStatus: true, currentState: true } }),
   ]);
 
   const totalsByType = new Map(durationsByType.map((row) => [row.type, row._sum.durationSeconds ?? 0]));
@@ -36,9 +35,7 @@ statsRouter.get('/summary', requireAdminAuth, async (req, res) => {
   // "who's online" vs. "who was active in this window" — and "active" is
   // ambiguous between them. This endpoint answers the former; from/to only
   // scopes the duration totals below, not this count.
-  const activeDeviceCount = devices.filter(
-    (device) => deriveDeviceStatus(device, latestTypeByDevice.get(device.id) ?? null) !== 'offline',
-  ).length;
+  const activeDeviceCount = devices.filter((device) => deriveDeviceStatus(device) !== 'offline').length;
 
   res.json({
     active_device_count: activeDeviceCount,

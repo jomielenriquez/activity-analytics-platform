@@ -88,11 +88,17 @@ function validateEvent(raw: unknown, index: number): { errors: string[]; row?: V
 
 eventsRouter.post('/', requireDeviceAuth, async (req, res) => {
   const device = req.device!;
-  const { agent_status, events } = req.body ?? {};
+  const { agent_status, current_state, state_duration_seconds, events } = req.body ?? {};
 
   const bodyErrors: string[] = [];
   if (agent_status !== 'running' && agent_status !== 'paused') {
     bodyErrors.push("agent_status must be 'running' or 'paused'");
+  }
+  if (current_state !== 'active' && current_state !== 'idle') {
+    bodyErrors.push("current_state must be 'active' or 'idle'");
+  }
+  if (!Number.isInteger(state_duration_seconds) || (state_duration_seconds as number) < 0) {
+    bodyErrors.push('state_duration_seconds must be a non-negative integer');
   }
   if (!Array.isArray(events)) {
     bodyErrors.push('events must be an array');
@@ -130,7 +136,12 @@ eventsRouter.post('/', requireDeviceAuth, async (req, res) => {
 
     await tx.device.update({
       where: { id: device.id },
-      data: { agentStatus: agent_status, lastSeenAt: new Date() },
+      data: {
+        agentStatus: agent_status,
+        currentState: current_state,
+        stateDurationSeconds: state_duration_seconds,
+        lastSeenAt: new Date(),
+      },
     });
 
     return { accepted: insertedCount, duplicates: rows.length - insertedCount };

@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { getDevices } from '../api';
 import { StatusBadge } from '../components/StatusBadge';
 import { formatRelativeTime } from '../utils/relativeTime';
+import { formatDurationLong } from '../utils/formatDuration';
 import { errorMessage, useApiData } from '../hooks/useApiData';
 
 const POLL_INTERVAL_MS = 15000;
@@ -55,6 +56,12 @@ export function DevicesPage() {
                 <td>{formatRelativeTime(device.last_seen_at)}</td>
                 <td>
                   <StatusBadge status={device.status} />
+                  {device.status === 'idle' && device.state_duration_seconds !== null && (
+                    <span className="status-duration">
+                      {' '}
+                      for {formatDurationLong(device.state_duration_seconds)}
+                    </span>
+                  )}
                 </td>
               </tr>
             ))}

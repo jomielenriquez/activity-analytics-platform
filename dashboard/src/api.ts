@@ -24,6 +24,7 @@ export interface Device {
   user_identifier: string;
   last_seen_at: string | null;
   status: DeviceStatus;
+  state_duration_seconds: number | null;
 }
 
 export interface TimelineSegment {

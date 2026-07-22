@@ -39,7 +39,7 @@ describe('GET /api/v1/activity/recent', () => {
     const res = await request(app)
       .post('/api/v1/events')
       .set('Authorization', `Bearer ${apiKey}`)
-      .send({ agent_status: 'running', events });
+      .send({ agent_status: 'running', current_state: 'idle', state_duration_seconds: 0, events });
 
     expect(res.status).toBe(202);
     expect(res.body.accepted).toBe(SEED_COUNT);

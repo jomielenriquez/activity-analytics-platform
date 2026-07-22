@@ -1,22 +1,23 @@
 import { randomBytes } from 'crypto';
 import { Router, type Response } from 'express';
-import type { Device, SegmentType } from '@prisma/client';
+import type { Device } from '@prisma/client';
 import { prisma } from '../db';
 import { hashApiKey, requireAdminAuth } from '../middleware/auth';
 import { isNonEmptyString, isUuid } from '../validation';
-import { deriveDeviceStatus, getLatestSegmentTypeByDevice } from '../lib/deviceStatus';
+import { deriveDeviceStatus } from '../lib/deviceStatus';
 import { buildStartedAtFilter, parseDateRangeQuery } from '../lib/dateRange';
 
 export const devicesRouter = Router();
 
-function serializeDevice(device: Device, latestSegmentType: SegmentType | null) {
+function serializeDevice(device: Device) {
   return {
     id: device.id,
     device_name: device.deviceName,
     os: device.os,
     user_identifier: device.userIdentifier,
     last_seen_at: device.lastSeenAt,
-    status: deriveDeviceStatus(device, latestSegmentType),
+    status: deriveDeviceStatus(device),
+    state_duration_seconds: device.stateDurationSeconds,
   };
 }
 
@@ -74,14 +75,11 @@ devicesRouter.post('/register', async (req, res) => {
 });
 
 devicesRouter.get('/', requireAdminAuth, async (req, res) => {
-  const [devices, latestTypeByDevice] = await Promise.all([
-    prisma.device.findMany({
-      orderBy: { lastSeenAt: { sort: 'desc', nulls: 'last' } },
-    }),
-    getLatestSegmentTypeByDevice(),
-  ]);
+  const devices = await prisma.device.findMany({
+    orderBy: { lastSeenAt: { sort: 'desc', nulls: 'last' } },
+  });
 
-  res.json(devices.map((device) => serializeDevice(device, latestTypeByDevice.get(device.id) ?? null)));
+  res.json(devices.map((device) => serializeDevice(device)));
 });
 
 devicesRouter.get('/:id', requireAdminAuth, async (req, res) => {
@@ -90,14 +88,8 @@ devicesRouter.get('/:id', requireAdminAuth, async (req, res) => {
     return;
   }
 
-  const latestSegment = await prisma.activitySegment.findFirst({
-    where: { deviceId: device.id },
-    orderBy: { startedAt: 'desc' },
-    select: { type: true },
-  });
-
   res.json({
-    ...serializeDevice(device, latestSegment?.type ?? null),
+    ...serializeDevice(device),
     created_at: device.createdAt,
   });
 });

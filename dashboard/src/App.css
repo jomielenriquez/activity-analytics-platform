@@ -28,6 +28,12 @@
   font-size: 14px;
   padding-bottom: 4px;
   border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.nav-item:hover {
+  color: var(--text-primary);
 }
 
 .nav-item--active {
@@ -120,14 +126,24 @@
   background: var(--status-neutral);
 }
 
+.status-duration {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.device-table tbody tr:hover {
+  background: var(--page);
+}
+
 .row-link {
-  color: var(--text-primary);
+  color: var(--accent);
   text-decoration: none;
   font-weight: 500;
+  cursor: pointer;
 }
 
 .row-link:hover {
-  color: var(--accent);
   text-decoration: underline;
 }
 

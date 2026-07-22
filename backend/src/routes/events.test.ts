@@ -40,7 +40,7 @@ describe('POST /api/v1/events', () => {
     const res = await request(app)
       .post('/api/v1/events')
       .set('Authorization', `Bearer ${apiKey}`)
-      .send({ agent_status: 'running', events: [] });
+      .send({ agent_status: 'running', current_state: 'active', state_duration_seconds: 0, events: [] });
 
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ accepted: 0, duplicates: 0 });
@@ -55,6 +55,8 @@ describe('POST /api/v1/events', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'idle',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: idA,
@@ -85,6 +87,8 @@ describe('POST /api/v1/events', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'idle',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: idA,
@@ -118,6 +122,8 @@ describe('POST /api/v1/events', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: idA,
@@ -147,6 +153,8 @@ describe('POST /api/v1/events', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: idValid,
@@ -195,6 +203,8 @@ describe('POST /api/v1/events', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'idle',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: 'not-a-uuid',
@@ -218,6 +228,8 @@ describe('POST /api/v1/events', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: idTrunc,
@@ -243,7 +255,7 @@ describe('POST /api/v1/events', () => {
     const res = await request(app)
       .post('/api/v1/events')
       .set('Authorization', `Bearer ${apiKey}`)
-      .send({ agent_status: 'paused', events: [] });
+      .send({ agent_status: 'paused', current_state: 'active', state_duration_seconds: 0, events: [] });
 
     expect(res.status).toBe(202);
 
@@ -255,5 +267,38 @@ describe('POST /api/v1/events', () => {
     // exactly what this scenario is meant to cover.
     expect(device?.lastSeenAt).not.toBeNull();
     expect(device!.lastSeenAt!.getTime()).toBeGreaterThanOrEqual(before.getTime());
+  });
+
+  it('[11] rejects a request with a missing or invalid current_state', async () => {
+    const res = await request(app)
+      .post('/api/v1/events')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({ agent_status: 'running', current_state: 'sleeping', events: [] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.details).toContain("current_state must be 'active' or 'idle'");
+  });
+
+  it('[12] persists current_state and state_duration_seconds on the device row from a heartbeat-only tick', async () => {
+    const res = await request(app)
+      .post('/api/v1/events')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({ agent_status: 'running', current_state: 'idle', state_duration_seconds: 42, events: [] });
+
+    expect(res.status).toBe(202);
+
+    const device = await prisma.device.findUnique({ where: { id: deviceId } });
+    expect(device?.currentState).toBe('idle');
+    expect(device?.stateDurationSeconds).toBe(42);
+  });
+
+  it('[13] rejects a request with a missing or invalid state_duration_seconds', async () => {
+    const res = await request(app)
+      .post('/api/v1/events')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({ agent_status: 'running', current_state: 'idle', state_duration_seconds: -1, events: [] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.details).toContain('state_duration_seconds must be a non-negative integer');
   });
 });

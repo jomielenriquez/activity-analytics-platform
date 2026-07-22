@@ -1940,3 +1940,437 @@ required scope for all three components** (agent, backend, dashboard).
 `DESIGN.md` and both project READMEs reflect this. Twelve known
 limitations are documented across the project, each a deliberate,
 explained decision rather than an oversight.
+
+### Prompt 34 (user, verbatim)
+
+> The dashboard is not showing idle status after the device has been idle for 400+ seconds (past both the 5-minute agent idle threshold and the 90s offline check window). Debug this in layers, don't just guess: (1) query GET /devices directly with curl/Invoke-RestMethod and check if status is wrong at the API level or just stale in the UI, (2) check Postgres directly for whether an idle segment actually landed from the agent, (3) check the agent's own console log for whether it detected the idle transition at all. Report which layer is actually broken before proposing a fix - this could be an agent bug, a backend derivation bug, or a frontend polling bug, and the fix is different for each.
+
+### Response 34 (assistant)
+
+Read the code at all three layers first to form a hypothesis before
+touching anything live: `deviceStatus.ts`'s `deriveDeviceStatus` (derives
+status from the *latest closed* segment's type), `segment.go`'s
+`SegmentBuilder.Observe` (a segment only closes on a transition or its own
+`SegmentMaxDurationSeconds` force-flush), and `DevicesPage.tsx`/
+`useApiData` (just renders whatever the API returns, no independent
+staleness logic). This produced a specific, falsifiable hypothesis before
+any live test: an idle transition closes the *previous active* segment
+immediately (visible right away), but the *new idle* segment itself
+doesn't close — and thus never reaches Postgres — until either the user
+becomes active again or its own 300s force-flush fires. So a device idle
+for 400s (past the 300s detection threshold, short of the 600s a
+from-scratch idle segment needs to force-flush on its own) would show
+stale `active` status by pure data-flow lag, not a bug in any single
+layer's own logic.
+
+Verified this live rather than shipping the theory: removed a stale
+`device.json` left over from earlier cleanup (pointed at a device_id
+already deleted from Postgres — would have contaminated the test with an
+unrelated 401 failure mode), rebuilt and freshly registered the agent, and
+started a real background wait for real OS idle time to accumulate
+(confirmed earlier in this project that spawning processes via the Bash
+tool does not touch `GetLastInputInfo` — idle climbed cleanly through
+several of my own tool calls with no resets).
+
+**Interrupted mid-wait** ("I've closed it in the tray, try again" — the
+user quit the agent via its tray icon partway through, before idle crossed
+100s). Diagnosed rather than just restarting blindly: confirmed
+`agent.exe` had actually exited, stopped the now-useless background sleep
+task, and noted a secondary real finding in passing (not the main bug):
+`onExit()` is a no-op, so the segment that had just closed when the tray
+was clicked was queued but never flushed/sent before the process exited —
+lost. Restarted cleanly (reused the same `device.json`, confirmed via the
+"loaded existing credentials" log line) and re-ran the wait.
+
+**Layer-by-layer result**, captured as a single simultaneous snapshot
+after 395s of real idle (not snapshots taken minutes apart, which had
+briefly produced a confusing/contradictory-looking read — see below):
+
+| Layer | Finding |
+|---|---|
+| 3 — agent log | `[tracker] idle \| idle=395s`, real-time correct |
+| 2 — Postgres | 3 most recent closed segments all `type=active`; nothing idle landed yet |
+| 1 — API (`curl`) | `"status":"active"` — wrong, but *correctly derived* from what Postgres actually has |
+
+Conclusion: **no single layer is broken.** Each does exactly what it's
+supposed to given its own inputs; the bug is the architectural gap between
+them — status is derived from closed-segment history, and a fresh idle
+segment can legitimately take up to 300s beyond the actual transition to
+close and become visible. Also caught and explained a genuine red herring
+along the way: a real HID input event landed mid-test (confirmed not from
+any of my own tool calls, and I wasn't running anything during the sleep
+window), briefly flipping the device back to active before it went idle
+again — reported this transparently as an uncontrolled real-desktop
+variable rather than silently discarding the inconvenient data point or
+pretending the first (contradictory) snapshot didn't happen.
+
+Presented three fix options (shorter force-flush specifically for idle
+segments; agent reports in-progress segment type on every heartbeat as a
+contract change; document as a known limitation) with a stated preference
+for the first, but **did not implement any of them** — explicitly left the
+choice to the user rather than picking one unprompted, since this is a
+real design tradeoff, not a bug with one obvious fix.
+
+Stopped the test agent process; did not yet clean up Postgres test data
+(left for the next turn, since the user might want to keep the live repro
+running to inspect further).
+
+### Prompt 35 (user, verbatim)
+
+> Two styling issues on the dashboard: (1) device name cells in the Devices table don't look clickable - no visual affordance (cursor, color, hover state) even though clicking them does navigate to the timeline. Add a clear clickable style (cursor: pointer, a hover state, maybe styled like a link or with a subtle background change on hover). (2) The top nav links (Devices/Stats/Recent Activity) are using default browser link styling (blue, underlined) instead of matching the dark theme used everywhere else - style them to fit the existing dark UI, removing the default underline/blue-link look, with a clear active-route indicator (you already have an active-state underline on "Devices" in the screenshot - extend that same pattern to whichever route is active, not just always on Devices).
+
+### Response 35 (assistant)
+
+Read `Layout.tsx` and `App.css` before changing anything, since the user's
+description of issue (2) ("always on Devices") didn't match what the
+`NavLink` code should already do — `className={({isActive}) => ...}` was
+already correctly keying off the actual active route, not hardcoded to
+Devices. Concluded the *logic* was already right and the *visual* bug was
+purely CSS: `.nav-item` (the base/inactive class) never set `color` or
+`text-decoration` at all — only `.nav-item--active` did — so inactive nav
+links fell through entirely to the browser's default anchor styling (blue,
+underlined), which is exactly what was reported. Explained this precisely
+rather than just silently patching it.
+
+Found the second bug the same way: `.row-link` set
+`color: var(--text-primary)` — deliberately, at the time, to follow the
+dataviz skill's "text never wears the data color" rule — but that rule is
+about not coloring *data labels* with series/status hues, not about
+stripping affordance from an actual navigation link. Applied to a real
+link, it made the device name render in the exact same color as
+non-clickable text in the same row, i.e. invisible as a link. Named this
+as the actual mistake (over-applying a rule outside its intended scope),
+not just "add color."
+
+Fixed both in `App.css`: `.nav-item` now gets `color: var(--text-secondary)`
++ `text-decoration: none` as its base state with a hover brightening to
+`--text-primary`, leaving `.nav-item--active`'s existing bold+underline
+treatment untouched. `.row-link` now uses `--accent` by default (not just
+on hover) plus explicit `cursor: pointer`, and added a subtle
+`tr:hover` row background as the second affordance signal the user
+suggested as optional ("maybe... a subtle background change on hover") —
+did both rather than picking just one, since they're complementary, not
+alternatives.
+
+Verified live in **both** light and dark mode specifically, since the user
+described their actual environment as dark-themed (this project's CSS
+supports both via `prefers-color-scheme`, but earlier verification passes
+in this project had only screenshotted light mode by default) — used
+Playwright's `colorScheme` context option to force each explicitly rather
+than guessing which one a default headless launch would produce. Screenshots
+confirmed: inactive nav items now render muted gray (not blue/underlined)
+in both modes, the active-route indicator correctly follows navigation to
+Stats and Recent Activity (not stuck on Devices — confirming the
+pre-existing logic really was already correct), device names render in a
+clearly distinct accent color with an underline-on-hover affordance, and
+the row-hover background is visible but genuinely subtle.
+
+Verified `npm run build`/`npm run lint` clean before and after, cleaned up
+all test devices/segments created across both this turn and the previous
+idle-debugging turn (19 segments, 3 devices — deferred from Prompt 34),
+and removed the local `device.json`/log artifacts from the idle repro.
+
+---
+
+**Outcome at end of session:** Root-caused the idle-status staleness to a
+genuine architectural gap (closed-segment-based status derivation lagging
+real-time by up to 300s on a state transition) rather than a bug in any
+one layer, confirmed via a live multi-layer snapshot rather than
+speculation, and left the fix choice to the user with three concrete
+options and a stated preference. Separately, fixed two real CSS gaps
+(inactive nav styling falling through to browser defaults; a navigation
+link accidentally styled identically to plain text) verified in both light
+and dark mode. No dashboard code changes from the debugging turn itself —
+that one was investigation-only, exactly as asked.
+
+## Session 2 — 2026-07-22
+
+### Prompt 36 (user, verbatim)
+
+> The dashboard's status column stays "active" even after the device has been idle for 400+ seconds. Important: last_seen_at updating to "now" on every POST is correct and expected behavior (it just reflects heartbeat liveness) - that's not the bug, don't touch that. Debug in layers instead: (1) check the agent's own console log for whether it actually detected and logged the active-to-idle transition, (2) query activity_segments directly in Postgres and confirm whether an idle segment actually landed after the last active one, (3) if an idle segment exists in the DB, check GET /devices directly and confirm whether deriveDeviceStatus's "latest segment" query is picking the right row for this device. Report which layer is actually broken - don't guess or fix anything until you've confirmed which one it is.
+
+### Response 36 (assistant)
+
+Same symptom as Prompt 34, but framed differently — step (3)'s phrasing
+("confirm the query is picking the right row") hinted the user might
+suspect a *different* root cause this time (a `DISTINCT ON` selection bug)
+rather than assuming it was identical to the already-closed Prompt 34
+finding, so treated it as a fresh investigation rather than re-asserting
+the old conclusion.
+
+Found both backend and dashboard dev servers already running (started
+independently by the user, not by me) and a fresh `device.json`
+(`device_id=23baabe8...`), indicating the user had run the real agent
+themselves and hit this live, not asking for a synthetic repro.
+
+Layered findings:
+- **Postgres**: 7 segments for the device, all `type: active` — the last
+  one force-flushed at exactly 300s (`WindowTitle.exe`, `duration=302s`).
+  Zero `idle` rows ever landed.
+- **`GET /api/v1/devices`** (queried live): returned `"status":"offline"`
+  — *not* what the user described. Reconciled this: `last_seen_at` was
+  266s+ stale because the agent process had since exited (no `agent.exe`
+  running), pushing it past `OFFLINE_THRESHOLD_SECONDS`. The "stuck on
+  active" symptom the user actually saw must have happened earlier, while
+  the agent was still alive and heartbeating — during that window,
+  `deriveDeviceStatus` had no idle segment to find (zero ever existed) so
+  it fell through to `active` for the entire live session.
+- **Agent console log (layer 1)**: not retrievable from artifacts — no
+  `agent.exe` process running, no log file on disk, and the process had
+  already exited by the time this was checked.
+
+Rather than accept that gap, asked the user how to close it (report what
+they saw / re-launch and watch live / skip and treat Postgres as
+sufficient) — chose **re-launch and watch live**, matching the same
+methodology as Prompt 34.
+
+Relaunched `agent.exe` fresh against the same device, redirected output to
+a log file, and waited ~5.5 real minutes with no keyboard/mouse input
+(confirmed in Prompt 34 that Bash-tool-spawned processes don't reset
+`GetLastInputInfo`). **Self-correction during the wait**: jumped ahead and
+checked the log ~27s into a 330s scheduled wait (a stray early
+re-invocation), caught it, and rescheduled the actual wait rather than
+reporting on premature data.
+
+At exactly `idle=300s`, the log showed:
+```
+[tracker] idle | idle=300s
+[tracker] segment closed and queued: id=... type=active app="Code.exe" duration=297s
+```
+— the agent detected the transition immediately and closed the segment
+that had just *ended* (the active one), exactly as `segment.go` is
+designed to. Checked Postgres and `GET /devices` again in the same
+instant: no idle segment existed yet (still open in memory), and status
+still read `"active"` at idle=339s+ — reproducing the exact bug live, not
+inferring it.
+
+**Conclusion, reported before any fix**: all three layers behave
+correctly given their own inputs. Layer 1 (agent) detects transitions in
+real time. Layer 2 (Postgres) has exactly what's been sent. Layer 3
+(`deriveDeviceStatus`) picks the right — only — row; there's just no idle
+row yet to pick. The bug is the same architectural gap as Prompt 34's
+finding (closed-segment-only status derivation), now confirmed via a
+second independent live reproduction rather than assumed to be identical
+without re-checking. Killed the test process and deleted the scratch log
+before ending the turn.
+
+### Prompt 37 (user, verbatim)
+
+> Implement the fix for known limitation #13. Add a current_state field to the agent's /events payload ("active" or "idle"), reflecting what the agent is doing right now, independent of whether that segment has closed yet. Update deriveDeviceStatus to use this live field instead of the latest closed segment's type - offline and paused checks stay exactly as they are, only the active/idle branch changes. Update the agent to include this field on every heartbeat. Write tests confirming status now reflects an idle transition within one heartbeat interval, not waiting for a force-flush. Update DESIGN.md - mark limitation #13 as resolved, with the fix and the new payload field documented in the API contract section, not just the limitations list.
+
+### Response 37 (assistant)
+
+Implemented end-to-end, no plan mode (execution request, not a design
+question):
+
+- **Backend**: added `Device.currentState` (`SegmentType?`) via a Prisma
+  migration (`add_device_current_state`) — hit an `EPERM` on
+  `prisma generate` from the running dev server holding a lock on the
+  query-engine DLL; killed the dev server, regenerated cleanly.
+  `POST /events` now requires `current_state: 'active'|'idle'`
+  (validated, `400` otherwise) and writes it to `devices.current_state`
+  unconditionally, same transaction as `agent_status`/`last_seen_at`.
+  `deriveDeviceStatus`'s signature simplified to take just the device row
+  (`currentState` now lives on it like `agentStatus`/`lastSeenAt` already
+  did) — offline/paused branches byte-for-byte unchanged, only the
+  idle/active branch swapped from the latest-closed-segment lookup to
+  `device.currentState`. This let `getLatestSegmentTypeByDevice()` and its
+  `DISTINCT ON` query be deleted entirely from `devices.ts`/`stats.ts`,
+  not just bypassed.
+- **Agent**: new `LiveState` (`state.go`) — a mutex-guarded active/idle
+  flag, updated on *every* poll tick (not just on segment close) by
+  `tracker.go`'s `poll()`, read by `sender.go` and included as
+  `current_state` on every heartbeat via `backend.go`'s `eventsRequest`.
+- **Tests**: updated all four existing backend test files (`events`,
+  `devices`, `stats`, `activity`) to send the now-required `current_state`
+  field — found every remaining gap via a multiline regex grep rather than
+  trusting a first pass. Added the actual regression test the user asked
+  for in `devices.test.ts`: sends an active→idle transition where only the
+  just-closed *active* segment lands (`activity_segments` has zero `idle`
+  rows for the device) and asserts status flips to `idle` on that
+  heartbeat anyway. Added a matching agent-side `state_test.go` asserting
+  `LiveState` reflects a transition immediately, independent of any
+  segment closing.
+- **DESIGN.md**: limitation #13 marked resolved (strikethrough + fix
+  description, not deleted), schema/status-derivation/API-contract
+  sections updated, and the stale "N+1 avoidance via `DISTINCT ON`" key
+  decision rewritten to describe the new design instead of the removed
+  one. `agent/README.md`'s example log line updated to match.
+
+Verified for real: `npx tsc --noEmit` clean, `npx vitest run` 57/57
+passing, `go build`/`go vet`/`go test` all clean. Restarted the backend
+dev server (which had auto-restarted itself via `tsx watch` picking up
+the edits) and confirmed it was serving the new code.
+
+---
+
+**Outcome:** Limitation #13 fixed and tested — status now derives from a
+live, every-heartbeat `current_state` field instead of the latest closed
+segment, cutting the worst-case lag from up to 300s down to one heartbeat
+interval (30s). Backend simplified in the process (one fewer raw query,
+`getLatestSegmentTypeByDevice` removed as dead code).
+
+### Prompt 38 (user, verbatim)
+
+> After the current_state fix, the dashboard now shows offline even though the device is actively heartbeating. Debug in layers: (1) check the agent's console log for any failed /events sends (likely a 400 if current_state isn't being sent/validated correctly - check for a field name mismatch like current_state vs currentState between what the agent sends and what the backend expects), (2) if sends are succeeding, check last_seen_at directly in Postgres to confirm it's actually fresh, (3) if last_seen_at is fresh but status is still offline, the bug is in deriveDeviceStatus's offline branch itself, not the active/idle change - walk through exactly what changed there since it was supposed to be untouched. Report which layer broke before fixing anything.
+
+### Response 38 (assistant)
+
+Found a live `agent.exe` (a different device than Prompt 36/37's) already
+running — the user testing the just-shipped fix themselves. Queried
+Postgres directly for that device: `lastSeenAt: null`, `currentState:
+null` — not stale, *never set, not even once*, despite the process having
+been running for 10+ minutes (well past several `HeartbeatIntervalSeconds`
+ticks). That ruled out "last_seen_at is fresh but offline branch is
+broken" immediately — it pointed straight at every heartbeat failing.
+
+Compared `agent.exe`'s file mtime against the source files implementing
+`current_state` (`backend.go`, `sender.go`, `state.go`, `tracker.go`,
+`main.go`): the binary was last built **06:21:22**, the source edits
+landed **08:10–08:11**, and the running process had started **08:32:14**
+— a stale, pre-fix binary, never rebuilt after Prompt 37's changes.
+
+Confirmed the exact failure mode by replaying what the stale binary
+actually sends (`{"agent_status":"running","events":[]}`, no
+`current_state`) directly against the live backend:
+```
+400 {"error":"Invalid request body","details":["current_state must be 'active' or 'idle'"]}
+```
+Every heartbeat from that process had been rejected since it started —
+consistent with `last_seen_at` never having been set.
+
+**Reported before fixing**: not a code bug. Layer 1 (agent) was running
+stale code. Layer 2 (Postgres) was consistent with that (never written).
+Layer 3 (`deriveDeviceStatus`'s offline branch) was untouched and
+behaving correctly — `!lastSeenAt → offline` is exactly what it should do
+when `last_seen_at` really is `null`. The fix is a rebuild, not a code
+change.
+
+### Prompt 39 (user, verbatim)
+
+> proceed
+
+### Response 39 (assistant)
+
+Killed the stale process (already gone by the time the command ran — a
+second, independent stale-binary copy turned up: PID 31748, started
+08:49:51, *before* the rebuild that was about to happen at 08:51:10 —
+recognized it couldn't be something launched in this turn and killed it
+too, to avoid a confusing dual-process verification). Rebuilt `agent.exe`
+from current source, relaunched it against the existing `device.json`.
+
+Verified live: first heartbeat logged
+`current_state=active` and was accepted; Postgres showed
+`currentState: active`, fresh `lastSeenAt`; `GET /devices/:id` returned
+`"status":"active"`. Deleted the scratch verification log.
+
+---
+
+**Outcome:** Confirmed the Prompt 38 diagnosis was correct — rebuilding
+and relaunching fixed it, with no code changes needed. `deriveDeviceStatus`
+was never touched by this bug.
+
+### Prompt 40 (user, verbatim)
+
+> Add idle/active duration tracking and display it on the dashboard.
+>
+> Agent: track state_duration_seconds in LiveState alongside current_state - how long the agent has been continuously in its current state (reset to 0 whenever active/idle flips, incrementing each poll tick otherwise). Include it in every /events heartbeat payload alongside current_state.
+>
+> Backend: accept state_duration_seconds in the POST /events body (validate it's a non-negative integer). Store it on the devices table alongside current_state (add the column via migration), overwritten on every heartbeat same as current_state. Expose it in GET /devices and GET /devices/:id as state_duration_seconds.
+>
+> Dashboard: on the Devices table, next to the status badge, show a short duration string for idle devices - e.g. "Idle for 6m 40s" - formatted from state_duration_seconds. For active devices, decide whether to show "Active for Xm" too or leave it status-only, your call, explain the reasoning. Update on the existing 15s poll, no new polling logic needed.
+>
+> Write tests: backend test confirming state_duration_seconds is stored and returned correctly, and confirming it resets to a low value right after a state transition (not carrying over the previous state's duration). Agent test confirming the duration counter increments correctly across ticks and resets on transition.
+>
+> Update DESIGN.md - schema, API contract, and note this closes the "no idle duration visibility" gap from the earlier last_seen_at confusion.
+
+### Response 40 (assistant)
+
+Implemented end-to-end, using `TodoWrite` to track the ~11-step scope
+across three components:
+
+- **Agent**: extended `LiveState` (`state.go`) with a `duration int` field.
+  `Set(active)` increments it by `PollIntervalSeconds` when the new
+  observation matches the current state, resets it to `0` on a flip —
+  deliberately tick-counted rather than wall-clock-measured, so it stays
+  exact even across a paused period (no ticks delivered while paused, so
+  duration simply stops advancing instead of jumping on resume). Exposed
+  via `StateDurationSeconds()`, wired into `sender.go`/`backend.go`'s
+  `eventsRequest` as `state_duration_seconds`. `gofmt` auto-aligned the
+  new struct fields after editing.
+- **Backend**: new `devices.state_duration_seconds` column
+  (migration `add_device_state_duration` — ran cleanly this time, no dev
+  server holding a lock since it had already been stopped from Prompt 37).
+  `POST /events` validates it as a non-negative integer (`400` if not,
+  matching the existing `duration_seconds`-per-event pattern). Persisted
+  unconditionally alongside `current_state`. `serializeDevice()` now
+  returns it as-is (nullable) — deliberately **not** used in
+  `deriveDeviceStatus`, since it's a display value, not a status input.
+- **Dashboard**: new `formatDurationLong()` in `utils/formatDuration.ts`
+  (separate from the existing `formatSeconds` — that one rounds to a
+  single unit for compact chart labels, which would lose the "6m 40s"
+  precision asked for here). `DevicesPage.tsx` renders it only for idle
+  rows, next to the badge. **Design call, explained to the user**: active
+  devices show status-only, no duration — active is the calm/common-case
+  state, and in an activity-monitoring tool the actionable signal is "how
+  long has this been idle" (possible disengagement), not "how long has
+  this been active"; adding duration text to every active row would be
+  noise on the default case. Reuses the existing 15s poll, no new fetch
+  logic. Added a `.status-duration` CSS class (muted, tabular-nums).
+- **Tests**: backend — new `devices.test.ts` case sends two heartbeats
+  (active/300s, then idle/3s) and asserts the second GET returns `3`, not
+  a value carried over from `300`. Agent — extended `state_test.go` with
+  cases for same-state accumulation (`3 × PollIntervalSeconds` after 3
+  ticks) and reset-then-reaccumulate on a flip.
+- **DESIGN.md**: schema block, device-status-derivation section (explicit
+  "not used by `deriveDeviceStatus`" note), and API contract
+  (`POST /events` body, `GET /devices` response shape) all updated;
+  explicitly ties this to the earlier `last_seen_at` confusion — noting
+  `last_seen_at` reflects heartbeat liveness, not time-in-state, so it was
+  never a usable proxy for "how long has this device been idle."
+  `agent/README.md`'s example log line updated to include
+  `state_duration_seconds`, with a note about the reset-on-transition
+  behavior to watch for.
+
+Verified for real, including a live visual check (per this project's
+standing rule for UI changes): `tsc --noEmit`/`vitest run` (59/59) on the
+backend, `go build`/`go vet`/`go test` on the agent, `tsc --noEmit` +
+`npm run build` on the dashboard — all clean. Started both dev servers,
+registered two throwaway demo devices (`VISUAL-CHECK-IDLE`,
+`VISUAL-CHECK-ACTIVE`) via curl, sent one heartbeat each
+(`current_state=idle, state_duration_seconds=400` and
+`current_state=active, state_duration_seconds=125`), and screenshotted the
+Devices table via a Playwright script installed ad hoc in the scratch
+directory — confirmed "● Idle for 6m 40s" renders correctly in muted text
+next to the amber badge, and "● Active" renders with no duration
+suffix, in both light and dark color schemes. Deleted both demo devices
+from Postgres afterward and stopped the dev servers.
+
+---
+
+**Outcome:** `state_duration_seconds` implemented and verified across all
+three components — tracked tick-accurately on the agent, validated and
+persisted on the backend, displayed on idle rows on the dashboard (a
+deliberate, explained choice not to show it on active rows), covered by
+new tests on both the backend and agent, and documented in DESIGN.md as
+closing the "no idle-duration visibility" gap.
+
+### Prompt 41 (user, verbatim)
+
+> Update AI_USAGE.md
+
+### Response 41 (assistant)
+
+Read the existing file in full (2085 lines at the time) to find the true
+end of the last logged entry (Response 35's outcome block) rather than
+assuming where prior content stopped. Appended a new `## Session 2 —
+2026-07-22` heading (the file had only ever had one dated session heading;
+work had crossed a calendar day mid-conversation per the environment's own
+date-change notice) and backfilled Prompts 36–40 covering: the second live
+idle-status re-debug (Prompt 36, reconfirming the Prompt 34 root cause via
+a fresh independent repro rather than assuming it still held), the
+`current_state` fix implementation (Prompt 37), the stale-pre-fix-binary
+debugging turn (Prompt 38) and its resolution (Prompt 39, "proceed"), and
+the `state_duration_seconds` feature (Prompt 40). Caught and fixed one
+typo introduced while drafting (`VISUAL-CHECK-ACHECK-ACTIVE` →
+`VISUAL-CHECK-ACTIVE`) before finishing. Wrote this entry last.

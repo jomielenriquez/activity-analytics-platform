@@ -50,7 +50,7 @@ describe('GET /api/v1/stats/summary', () => {
     const eventsRes = await request(app)
       .post('/api/v1/events')
       .set('Authorization', `Bearer ${apiKey}`)
-      .send({ agent_status: 'running', events: [] });
+      .send({ agent_status: 'running', current_state: 'active', state_duration_seconds: 0, events: [] });
     expect(eventsRes.status).toBe(202);
 
     const after = await request(app).get('/api/v1/stats/summary').set(adminAuthHeader());
@@ -71,6 +71,8 @@ describe('GET /api/v1/stats/summary', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: randomUUID(),
@@ -151,6 +153,8 @@ describe('GET /api/v1/stats/top-apps', () => {
       .set('Authorization', `Bearer ${deviceA.apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: randomUUID(),
@@ -196,6 +200,8 @@ describe('GET /api/v1/stats/top-apps', () => {
       .set('Authorization', `Bearer ${deviceB.apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: randomUUID(),
@@ -292,6 +298,8 @@ describe('GET /api/v1/stats/activity-over-time', () => {
       .set('Authorization', `Bearer ${deviceA.apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           // 2034-01-01 10:00 hour bucket: 500 active, 100 idle
           {
@@ -379,6 +387,8 @@ describe('GET /api/v1/stats/activity-over-time', () => {
       .set('Authorization', `Bearer ${deviceB.apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: randomUUID(),

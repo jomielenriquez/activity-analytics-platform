@@ -1,5 +1,4 @@
 import type { SegmentType } from '@prisma/client';
-import { prisma } from '../db';
 
 // Matches the plan's pinned timing constant: 3 missed 30s heartbeats.
 export const OFFLINE_THRESHOLD_SECONDS = 90;
@@ -9,21 +8,25 @@ export type DeviceStatus = 'offline' | 'paused' | 'idle' | 'active';
 export interface DeviceStatusInput {
   lastSeenAt: Date | null;
   agentStatus: string;
+  currentState: SegmentType | null;
 }
 
 // device_status derivation, per the plan:
 //   last_seen_at older than 90s (or null) -> offline
 //   else if agent_status === 'paused'     -> paused
-//   else if latest segment type === idle  -> idle
+//   else if current_state === idle        -> idle
 //   else                                  -> active
-// `latestSegmentType` is null for a device that hasn't reported any
-// segments yet (e.g. freshly registered) — that's not an error case, it
-// just can't be 'idle', so it falls through to the last branch same as any
-// other non-idle state.
-export function deriveDeviceStatus(
-  device: DeviceStatusInput,
-  latestSegmentType: SegmentType | null,
-): DeviceStatus {
+// `currentState` is the agent's live self-reported active/idle state, sent
+// on every heartbeat (see POST /events) — independent of whether the
+// segment reflecting that state has closed yet. This fixes a real lag: the
+// previous version derived status from the *latest closed* segment, but a
+// newly-opened idle segment doesn't close (and so isn't visible) until a
+// transition back to active or its own SEGMENT_MAX_DURATION_SECONDS
+// force-flush, up to 300s after the real transition. `currentState` is
+// null for a device that hasn't sent a heartbeat yet (e.g. freshly
+// registered) — not an error case, it just can't be 'idle', so it falls
+// through to the last branch same as any other non-idle state.
+export function deriveDeviceStatus(device: DeviceStatusInput): DeviceStatus {
   if (!device.lastSeenAt) {
     return 'offline';
   }
@@ -37,24 +40,9 @@ export function deriveDeviceStatus(
     return 'paused';
   }
 
-  if (latestSegmentType === 'idle') {
+  if (device.currentState === 'idle') {
     return 'idle';
   }
 
   return 'active';
-}
-
-// Latest segment type per device, in one query rather than one query per
-// device: Prisma's query builder has no "latest related row per parent"
-// primitive (no window functions), so this uses Postgres's DISTINCT ON,
-// which the existing idx_segments_device_time (device_id, started_at)
-// index makes cheap. Shared by any endpoint that needs current derived
-// status for some or all devices (device list/detail, stats/summary).
-export async function getLatestSegmentTypeByDevice(): Promise<Map<string, SegmentType>> {
-  const rows = await prisma.$queryRaw<{ device_id: string; type: SegmentType }[]>`
-    SELECT DISTINCT ON (device_id) device_id, type
-    FROM activity_segments
-    ORDER BY device_id, started_at DESC
-  `;
-  return new Map(rows.map((row) => [row.device_id, row.type]));
 }

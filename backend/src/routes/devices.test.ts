@@ -48,7 +48,7 @@ describe('GET /api/v1/devices and GET /api/v1/devices/:id', () => {
     expect(res.body.last_seen_at).toBeNull();
   });
 
-  it('a device with a recent heartbeat and an active latest segment is "active"', async () => {
+  it('a device with a recent heartbeat and current_state "active" is "active"', async () => {
     const { deviceId, apiKey } = await registerDevice('STATUS-ACTIVE');
 
     const eventsRes = await request(app)
@@ -56,6 +56,8 @@ describe('GET /api/v1/devices and GET /api/v1/devices/:id', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: randomUUID(),
@@ -75,7 +77,7 @@ describe('GET /api/v1/devices and GET /api/v1/devices/:id', () => {
     expect(res.body.status).toBe('active');
   });
 
-  it('agent_status "paused" wins over the latest segment being "active"', async () => {
+  it('agent_status "paused" wins over current_state being "active"', async () => {
     const { deviceId, apiKey } = await registerDevice('STATUS-PAUSED');
 
     const eventsRes = await request(app)
@@ -83,6 +85,8 @@ describe('GET /api/v1/devices and GET /api/v1/devices/:id', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'paused',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: randomUUID(),
@@ -102,7 +106,7 @@ describe('GET /api/v1/devices and GET /api/v1/devices/:id', () => {
     expect(res.body.status).toBe('paused');
   });
 
-  it('agent_status "running" with an idle latest segment is "idle"', async () => {
+  it('agent_status "running" with current_state "idle" is "idle"', async () => {
     const { deviceId, apiKey } = await registerDevice('STATUS-IDLE');
 
     const eventsRes = await request(app)
@@ -110,6 +114,8 @@ describe('GET /api/v1/devices and GET /api/v1/devices/:id', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'idle',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: randomUUID(),
@@ -127,13 +133,120 @@ describe('GET /api/v1/devices and GET /api/v1/devices/:id', () => {
     expect(res.body.status).toBe('idle');
   });
 
+  // The regression test for the current_state fix: reproduces exactly the
+  // scenario confirmed live during debugging (agent transitions active ->
+  // idle; only the just-finished *active* segment closes and is sent —
+  // the new idle segment stays open, unflushed, until its own
+  // SEGMENT_MAX_DURATION_SECONDS force-flush or a transition back to
+  // active). Before this fix, status was derived from the latest *closed*
+  // segment, so this heartbeat would still read "active" for up to 300s.
+  // With current_state, status flips to "idle" on the very next heartbeat
+  // that reports it, regardless of what's in activity_segments.
+  it('status reflects a live idle transition on the next heartbeat, without waiting for the idle segment to close', async () => {
+    const { deviceId, apiKey } = await registerDevice('STATUS-LIVE-TRANSITION');
+
+    // Heartbeat 1: still active, with a closed active segment (the normal
+    // steady-state case) — status should read "active".
+    const firstHeartbeat = await request(app)
+      .post('/api/v1/events')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({
+        agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
+        events: [
+          {
+            client_segment_id: randomUUID(),
+            type: 'active',
+            app_name: 'Code.exe',
+            window_title: 'Editing',
+            started_at: new Date(Date.now() - 120_000).toISOString(),
+            ended_at: new Date(Date.now() - 60_000).toISOString(),
+            duration_seconds: 60,
+          },
+        ],
+      });
+    expect(firstHeartbeat.status).toBe(202);
+
+    const afterFirst = await request(app).get(`/api/v1/devices/${deviceId}`).set(adminAuthHeader());
+    expect(afterFirst.body.status).toBe('active');
+
+    // Heartbeat 2: the user just went idle. Only the segment that closed on
+    // that transition (the *active* one that just ended) is in `events` —
+    // the new idle segment hasn't closed yet, so no idle row exists in
+    // activity_segments at all. current_state is the only signal carrying
+    // the live transition.
+    const secondHeartbeat = await request(app)
+      .post('/api/v1/events')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({
+        agent_status: 'running',
+        current_state: 'idle',
+        state_duration_seconds: 0,
+        events: [
+          {
+            client_segment_id: randomUUID(),
+            type: 'active',
+            app_name: 'Code.exe',
+            window_title: 'Editing',
+            started_at: new Date(Date.now() - 60_000).toISOString(),
+            ended_at: new Date().toISOString(),
+            duration_seconds: 60,
+          },
+        ],
+      });
+    expect(secondHeartbeat.status).toBe(202);
+
+    // No idle segment exists yet — confirms the fix isn't reading from
+    // activity_segments to reach this answer.
+    const idleSegmentCount = await prisma.activitySegment.count({
+      where: { deviceId, type: 'idle' },
+    });
+    expect(idleSegmentCount).toBe(0);
+
+    const afterSecond = await request(app).get(`/api/v1/devices/${deviceId}`).set(adminAuthHeader());
+    expect(afterSecond.status).toBe(200);
+    expect(afterSecond.body.status).toBe('idle');
+  });
+
+  it('state_duration_seconds is stored and returned, and resets to a low value on a state transition', async () => {
+    const { deviceId, apiKey } = await registerDevice('STATUS-DURATION');
+
+    // Heartbeat 1: been active for a while — state_duration_seconds should
+    // round-trip exactly through storage and GET /devices/:id.
+    const firstHeartbeat = await request(app)
+      .post('/api/v1/events')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({ agent_status: 'running', current_state: 'active', state_duration_seconds: 300, events: [] });
+    expect(firstHeartbeat.status).toBe(202);
+
+    const afterFirst = await request(app).get(`/api/v1/devices/${deviceId}`).set(adminAuthHeader());
+    expect(afterFirst.status).toBe(200);
+    expect(afterFirst.body.state_duration_seconds).toBe(300);
+
+    // Heartbeat 2: transitions to idle. A real agent resets its counter to
+    // (about) 0 on a flip, so this simulates one poll tick since the
+    // transition — a small value that must NOT still read as the previous
+    // state's 300s.
+    const secondHeartbeat = await request(app)
+      .post('/api/v1/events')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({ agent_status: 'running', current_state: 'idle', state_duration_seconds: 3, events: [] });
+    expect(secondHeartbeat.status).toBe(202);
+
+    const afterSecond = await request(app).get(`/api/v1/devices/${deviceId}`).set(adminAuthHeader());
+    expect(afterSecond.status).toBe(200);
+    expect(afterSecond.body.state_duration_seconds).toBe(3);
+    expect(afterSecond.body.state_duration_seconds).toBeLessThan(afterFirst.body.state_duration_seconds);
+  });
+
   it('a device with a stale last_seen_at (>90s) is "offline" even if agent_status is "running"', async () => {
     const { deviceId, apiKey } = await registerDevice('STATUS-STALE');
 
     const eventsRes = await request(app)
       .post('/api/v1/events')
       .set('Authorization', `Bearer ${apiKey}`)
-      .send({ agent_status: 'running', events: [] });
+      .send({ agent_status: 'running', current_state: 'active', state_duration_seconds: 0, events: [] });
     expect(eventsRes.status).toBe(202);
 
     // The API always sets last_seen_at to "now", so simulating staleness
@@ -211,6 +324,8 @@ describe('GET /api/v1/devices/:id/timeline', () => {
       .set('Authorization', `Bearer ${apiKey}`)
       .send({
         agent_status: 'running',
+        current_state: 'active',
+        state_duration_seconds: 0,
         events: [
           {
             client_segment_id: randomUUID(),

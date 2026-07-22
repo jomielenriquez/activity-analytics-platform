@@ -15,14 +15,16 @@ enum SegmentType {
 }
 
 model Device {
-  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  deviceName     String    @map("device_name")
-  os             String
-  userIdentifier String    @map("user_identifier")
-  apiKeyHash     String    @map("api_key_hash")
-  agentStatus    String    @default("running") @map("agent_status")
-  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  lastSeenAt     DateTime? @map("last_seen_at") @db.Timestamptz(6)
+  id                   String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  deviceName           String       @map("device_name")
+  os                   String
+  userIdentifier       String       @map("user_identifier")
+  apiKeyHash           String       @map("api_key_hash")
+  agentStatus          String       @default("running") @map("agent_status")
+  currentState         SegmentType? @map("current_state")
+  stateDurationSeconds Int?         @map("state_duration_seconds")
+  createdAt            DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastSeenAt           DateTime?    @map("last_seen_at") @db.Timestamptz(6)
 
   segments ActivitySegment[]
 
